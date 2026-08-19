@@ -233,8 +233,21 @@ function ingest(chatJid, raw, { live }) {
 
   resolveGroupName(canonicalTarget)
 
-  if (live && !existed && !message.fromMe) {
-    store.bumpUnread(canonicalTarget)
+  if (message.fromMe) {
+    store.setUnread(canonicalTarget, 0)
+  } else if (live && !existed) {
+    const currentUnread = chat.unread || 0
+    const now = Date.now()
+    if (currentUnread === 0) {
+      store.setUnread(canonicalTarget, 1)
+    } else if (currentUnread === 1 && chat.lastUnreadSync && (now - chat.lastUnreadSync < 5000)) {
+      // chats.update or metadata sync already set unread to 1 for this incoming message
+      store.setUnread(canonicalTarget, 1)
+    } else {
+      store.bumpUnread(canonicalTarget)
+    }
+    chat.lastUnreadSync = now
+
     if (message.ts >= startedAt) {
       const title = chat.isGroup ? (chat.name || 'Group') : (message.senderName || chat.name)
       const body = chat.isGroup ? `${message.senderName}: ${message.text}` : message.text
@@ -250,14 +263,41 @@ function ingest(chatJid, raw, { live }) {
 }
 
 function applyChatMetadata(rawChats) {
+  let unreadChanged = false
   for (const raw of rawChats || []) {
     const jid = raw?.id
     if (!jid || isIgnorableChat(jid)) continue
-    if (raw.pnJid) store.alias(jid, raw.pnJid)
-    if (raw.lidJid) store.alias(jid, raw.lidJid)
-    const chat = store.chat(jid)
-    if (raw.name) store.rememberName(jid, raw.name)
-    if (typeof raw.unreadCount === 'number') chat.unread = Math.max(0, raw.unreadCount)
+    const canonical = store.canonicalJid(jid) || normalizeJid(jid) || jid
+    if (raw.pnJid) store.alias(canonical, raw.pnJid)
+    if (raw.lidJid) store.alias(canonical, raw.lidJid)
+    const chat = store.chat(canonical)
+    if (raw.name) store.rememberName(canonical, raw.name)
+
+    if (raw.unreadCount !== undefined && raw.unreadCount !== null) {
+      let count = 0
+      if (typeof raw.unreadCount === 'number') {
+        // In WhatsApp protocol, unreadCount = -1 means "marked as unread" on another device
+        count = raw.unreadCount < 0 ? 1 : raw.unreadCount
+      }
+      if (chat.unread !== count) {
+        store.setUnread(canonical, count)
+        unreadChanged = true
+      }
+      chat.lastUnreadSync = Date.now()
+    } else if (raw.unread === true || raw.markedUnread === true) {
+      if (chat.unread === 0) {
+        store.setUnread(canonical, 1)
+        unreadChanged = true
+      }
+      chat.lastUnreadSync = Date.now()
+    } else if (raw.unread === false || raw.read === true) {
+      if (chat.unread !== 0) {
+        store.setUnread(canonical, 0)
+        unreadChanged = true
+      }
+      chat.lastUnreadSync = Date.now()
+    }
+
     if (raw.conversationTimestamp !== undefined) {
       const ts = toTs(raw.conversationTimestamp)
       if (ts > (chat.lastTs || 0)) chat.lastTs = ts
@@ -271,6 +311,7 @@ function applyChatMetadata(rawChats) {
   }
   store.applyNamesToChats()
   store.markDirty()
+  return unreadChanged
 }
 
 function asLidJid(value) {
@@ -665,8 +706,10 @@ async function connect() {
 
     sock.ev.on('chats.update', (updates) => {
       if (sock !== thisSocket) return
-      applyChatMetadata(updates)
+      const before = store.totalUnread()
+      const unreadChanged = applyChatMetadata(updates)
       pushChatsSoon()
+      if (unreadChanged || store.totalUnread() !== before) pushState()
     })
 
     sock.ev.on('chats.delete', (jids) => {
@@ -736,34 +779,66 @@ async function connect() {
 
     sock.ev.on('messages.update', (updates) => {
       if (sock !== thisSocket) return
+      const before = store.totalUnread()
+      let unreadCleared = false
       for (const update of updates || []) {
-        const jid = update?.key?.remoteJid
-        const id = update?.key?.id
-        if (!jid || !id) continue
-        const found = store.findMessage(jid, id)
+        const jid = update?.key?.remoteJid || update?.remoteJid
+        if (!jid) continue
+        const canonical = store.canonicalJid(jid) || normalizeJid(jid) || jid
+
+        const u = update.update || update
+        if (u.readTimestamp || u.status === 3 || u.status === 4 || u.type === 'read-self') {
+          store.setUnread(canonical, 0)
+          unreadCleared = true
+        }
+
+        const id = update?.key?.id || update?.id
+        if (!id) continue
+        const found = store.findMessage(canonical, id)
         if (!found) continue
-        const status = update.update?.status
-        if (typeof status !== 'number') continue
-        if (status < (found.status || 0)) continue
+        const status = typeof u.status === 'number' ? u.status : (u.readTimestamp ? 4 : 0)
+        if (!status || status < (found.status || 0)) continue
         found.status = status
         store.markDirty()
-        bus.broadcast({ t: 'messageStatus', jid: found.key?.remoteJid || jid, id, status })
+        bus.broadcast({ t: 'messageStatus', jid: found.key?.remoteJid || canonical, id, status })
+      }
+      if (unreadCleared || store.totalUnread() !== before) {
+        pushChatsSoon()
+        pushState()
       }
     })
 
     sock.ev.on('message-receipt.update', (updates) => {
       if (sock !== thisSocket) return
+      const before = store.totalUnread()
+      let unreadCleared = false
       for (const update of updates || []) {
         const jid = update?.key?.remoteJid
+        if (!jid) continue
+        const canonical = store.canonicalJid(jid) || normalizeJid(jid) || jid
+
+        const receipt = update.receipt || {}
+        const receiptType = receipt.receiptType || receipt.type
+        const isReadReceipt = receipt.readTimestamp || receiptType === 'read' || receiptType === 'read-self'
+
+        if (isReadReceipt) {
+          store.setUnread(canonical, 0)
+          unreadCleared = true
+        }
+
         const id = update?.key?.id
-        if (!jid || !id) continue
-        const found = store.findMessage(jid, id)
+        if (!id) continue
+        const found = store.findMessage(canonical, id)
         if (!found) continue
-        const next = update.receipt?.readTimestamp ? 4 : (update.receipt?.receiptTimestamp ? 3 : 0)
+        const next = receipt.readTimestamp ? 4 : (receipt.receiptTimestamp ? 3 : 0)
         if (!next || next < (found.status || 0)) continue
         found.status = next
         store.markDirty()
-        bus.broadcast({ t: 'messageStatus', jid: found.key?.remoteJid || jid, id, status: next })
+        bus.broadcast({ t: 'messageStatus', jid: found.key?.remoteJid || canonical, id, status: next })
+      }
+      if (unreadCleared || store.totalUnread() !== before) {
+        pushChatsSoon()
+        pushState()
       }
     })
   } catch (err) {

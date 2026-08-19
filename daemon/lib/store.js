@@ -326,37 +326,68 @@ export class Store {
   }
 
   setUnread(jid, count) {
-    const chat = this.chat(jid)
+    const key = this.canonicalJid(jid) || normalizeJid(jid) || jid
+    const chat = this.chat(key)
     const next = Math.max(0, count | 0)
-    if (chat.unread === next) return chat
     chat.unread = next
+
+    const aliased = this.aliases.get(key)
+    if (aliased) {
+      const altKey = normalizeJid(aliased)
+      const altChat = this.chats.get(altKey)
+      if (altChat) altChat.unread = next
+    }
     this.markDirty()
     return chat
   }
 
   bumpUnread(jid) {
-    const chat = this.chat(jid)
-    chat.unread = (chat.unread || 0) + 1
+    const key = this.canonicalJid(jid) || normalizeJid(jid) || jid
+    const chat = this.chat(key)
+    const next = (chat.unread || 0) + 1
+    chat.unread = next
+
+    const aliased = this.aliases.get(key)
+    if (aliased) {
+      const altKey = normalizeJid(aliased)
+      const altChat = this.chats.get(altKey)
+      if (altChat) altChat.unread = next
+    }
     this.markDirty()
     return chat
   }
 
   totalUnread() {
     let total = 0
+    const seen = new Set()
     for (const chat of this.chats.values()) {
-      if (chat.muted) continue
-      total += Math.max(0, chat.unread || 0)
+      if (!chat || chat.muted) continue
+      const canonical = this.canonicalJid(chat.jid) || chat.jid
+      if (seen.has(canonical)) continue
+      seen.add(canonical)
+      const canonicalChat = this.chat(canonical)
+      total += Math.max(0, canonicalChat.unread || 0)
     }
     return total
   }
 
   sortedChats() {
-    return [...this.chats.values()]
-      .filter((chat) => chat.lastTs > 0 || chat.unread > 0)
-      .sort((a, b) => {
-        if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1
-        return (b.lastTs || 0) - (a.lastTs || 0)
-      })
+    const seen = new Set()
+    const list = []
+    for (const chat of this.chats.values()) {
+      if (!chat) continue
+      const canonical = this.canonicalJid(chat.jid) || chat.jid
+      if (seen.has(canonical)) continue
+      seen.add(canonical)
+      const canonicalChat = this.chat(canonical)
+      if (canonicalChat.lastTs > 0 || canonicalChat.unread > 0) {
+        list.push(canonicalChat)
+      }
+    }
+    return list.sort((a, b) => {
+      if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1
+      return (b.lastTs || 0) - (a.lastTs || 0)
+    })
   }
 
   chatList(limit = 40) {
