@@ -35,6 +35,8 @@ export class Store {
     this.messages = new Map()
     /** @type {Map<string, string>} */
     this.names = new Map()
+    /** @type {Set<string>} */
+    this.addressBookKeys = new Set()
     /** @type {Map<string, string>} */
     this.aliases = new Map()
     this.me = null
@@ -70,6 +72,7 @@ export class Store {
         if (Array.isArray(list)) this.messages.set(jid, list.slice(-MAX_MESSAGES_PER_CHAT))
       }
       for (const [jid, name] of Object.entries(data.names || {})) this.names.set(jid, name)
+      for (const key of data.addressBookKeys || []) this.addressBookKeys.add(key)
       for (const [from, to] of Object.entries(data.aliases || {})) this.aliases.set(from, to)
       this.me = data.me || null
       for (const list of this.messages.values()) {
@@ -121,6 +124,7 @@ export class Store {
       chats,
       messages,
       names: Object.fromEntries(this.names),
+      addressBookKeys: [...this.addressBookKeys],
       aliases: Object.fromEntries(this.aliases)
     }
     const tmp = `${storeFile}.tmp`
@@ -132,29 +136,44 @@ export class Store {
     }
   }
 
-  rememberName(jid, name) {
+  rememberName(jid, name, isAddressBook = false) {
     if (!jid || !name) return false
     const key = this.canonicalJid(jid) || normalizeJid(jid)
     const clean = String(name).trim().replace(/[\u200e\u200f\u202a-\u202e]/g, '')
-    if (!key || !clean) return false
+    if (!key || !clean || isPlaceholderName(clean)) return false
+
+    const hasAddressBookName = this.addressBookKeys.has(key)
+    if (hasAddressBookName && !isAddressBook) return false
 
     const existing = this.names.get(key)
-    if (existing === clean) {
+    if (existing === clean && (isAddressBook ? hasAddressBookName : !hasAddressBookName)) {
       this._applyName(key, clean)
       return false
     }
-    if (existing && !isPlaceholderName(existing) && isPlaceholderName(clean)) return false
+
+    if (isAddressBook) {
+      this.addressBookKeys.add(key)
+    }
 
     this.names.set(key, clean)
     const aliased = this.aliases.get(key)
     if (aliased) {
       const normAliased = normalizeJid(aliased)
       this.names.set(normAliased, clean)
+      if (isAddressBook) this.addressBookKeys.add(normAliased)
       this._applyName(normAliased, clean)
     }
     this._applyName(key, clean)
     this.markDirty()
     return true
+  }
+
+  rememberContactName(jid, name) {
+    return this.rememberName(jid, name, true)
+  }
+
+  rememberPushName(jid, name) {
+    return this.rememberName(jid, name, false)
   }
 
   alias(a, b) {

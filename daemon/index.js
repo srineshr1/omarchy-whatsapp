@@ -223,12 +223,12 @@ function ingest(chatJid, raw, { live }) {
   const chat = store.touchChat(canonicalTarget, message)
 
   if (!chat.isGroup && !raw.key?.fromMe && raw.pushName) {
-    store.rememberName(canonicalTarget, raw.pushName)
+    store.rememberPushName(canonicalTarget, raw.pushName)
   }
 
   const participant = raw.key?.participant || raw.participant
   if (chat.isGroup && !raw.key?.fromMe && participant && raw.pushName) {
-    store.rememberName(participant, raw.pushName)
+    store.rememberPushName(participant, raw.pushName)
   }
 
   resolveGroupName(canonicalTarget)
@@ -373,9 +373,13 @@ function applyContacts(contacts) {
     if (!contact?.id && !contact?.lid && !contact?.jid) continue
     const ids = [contact.id, contact.lid, contact.jid].filter(Boolean).map((id) => normalizeJid(id) || id)
     for (let i = 1; i < ids.length; i++) store.alias(ids[0], ids[i])
-    const name = contact.name || contact.verifiedName || contact.notify
-    if (!name) continue
-    for (const id of ids) store.rememberName(id, name)
+    const addressBookName = contact.name || contact.verifiedName
+    const pushName = contact.notify
+    if (addressBookName) {
+      for (const id of ids) store.rememberContactName(id, addressBookName)
+    } else if (pushName) {
+      for (const id of ids) store.rememberPushName(id, pushName)
+    }
   }
   store.applyNamesToChats()
 }
