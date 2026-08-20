@@ -176,6 +176,16 @@ journalctl --user -u omarchy-whatsapp -n 50
 interpreter: `systemctl --user edit omarchy-whatsapp` and add
 `Environment=OMARCHY_WHATSAPP_NODE=/path/to/node`.
 
+**Daemon restart-loops / `EALLOWGIT` / `Permission denied (publickey)`**
+
+The first start installs daemon dependencies from the lockfile.
+`baileys@6.7.24` pulls `libsignal` from GitHub, and npm 12 refuses git
+dependencies unless `allow-git` is set. Setup now opts in for this
+project and clones over HTTPS, so a GitHub SSH key is not required.
+Update the plugin if you installed before that fix — an older lockfile
+recorded `git+ssh`. `git` must be on `PATH` (it is, if you installed
+with `omarchy plugin add`).
+
 **Widget not in the bar**
 
 ```sh

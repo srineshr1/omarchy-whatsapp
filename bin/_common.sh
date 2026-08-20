@@ -68,7 +68,19 @@ wa_ensure_deps() {
   echo "omarchy-whatsapp: installing daemon dependencies (first run only)..." >&2
   # --no-bin-links keeps the plugin folder free of symlinks, which Omarchy's
   # plugin validation rejects.
-  (cd "$WA_DAEMON_DIR" && PATH="$(dirname "$node"):$PATH" "$npm" install --omit=dev --no-bin-links --no-audit --no-fund) \
+  #
+  # npm 12 defaults allow-git to none; baileys@6.7.24 pulls libsignal from
+  # git. Fetch that public repo over HTTPS so a missing GitHub SSH key
+  # cannot fail the clone (the lockfile used to record git+ssh).
+  (cd "$WA_DAEMON_DIR" &&
+    PATH="$(dirname "$node"):$PATH" \
+    npm_config_allow_git="${npm_config_allow_git:-all}" \
+    GIT_CONFIG_COUNT=2 \
+    GIT_CONFIG_KEY_0='url.https://github.com/.insteadOf' \
+    GIT_CONFIG_VALUE_0='ssh://git@github.com/' \
+    GIT_CONFIG_KEY_1='url.https://github.com/.insteadOf' \
+    GIT_CONFIG_VALUE_1='git@github.com:' \
+    "$npm" ci --omit=dev --no-bin-links --no-audit --no-fund) \
     || wa_die "dependency install failed"
   find "$WA_DAEMON_DIR/node_modules" -type l -delete 2>/dev/null || true
 }
