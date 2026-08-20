@@ -40,7 +40,11 @@ Panel {
   readonly property bool linked: client ? client.signedIn : false
   readonly property bool showLogin: needsLogin
   readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-  readonly property color secondaryForeground: Qt.darker(root.barForeground, 1.5)
+  // Popup content must use the theme foreground. barForeground can switch to
+  // a wallpaper-contrast color when the bar is transparent, which may be dark
+  // even though the popup surface remains dark.
+  readonly property color foreground: root.bar ? root.bar.foreground : Color.foreground
+  readonly property color secondaryForeground: Qt.darker(root.foreground, 1.5)
   readonly property int chatLimit: root.setting("chatLimit", 40)
   readonly property int messageLimit: root.setting("messageLimit", 60)
 
@@ -311,15 +315,15 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             radius: 0
             color: backMouse.containsMouse
-              ? Style.hoverFillFor(root.barForeground, root.bar ? root.bar.urgent : Color.accent)
-              : Style.normalFillFor(root.barForeground, Color.accent)
-            border.color: root.barForeground
+              ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
+              : Style.normalFillFor(root.foreground, Color.accent)
+            border.color: root.foreground
             border.width: 1
 
             Text {
               anchors.centerIn: parent
               text: "\uf060"
-              color: root.barForeground
+              color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.icon
             }
@@ -347,7 +351,7 @@ Panel {
               text: root.view === "chat"
                 ? Model.chatTitle(root.activeChat || { jid: root.activeJid, name: "" })
                 : "WhatsApp"
-              color: root.barForeground
+              color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.subtitle
               font.bold: true
@@ -380,7 +384,7 @@ Panel {
             PanelActionButton {
               iconText: "\uf24d"
               tooltipText: "Open the full WhatsApp Web client"
-              foreground: root.barForeground
+              foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: {
                 root.openWebClient()
@@ -392,7 +396,7 @@ Panel {
               visible: !root.showLogin && root.view === "chats"
               iconText: "\uf011"
               tooltipText: "Log out of WhatsApp"
-              foreground: root.barForeground
+              foreground: root.foreground
               hoverColor: root.bar ? root.bar.urgent : Color.urgent
               fontFamily: root.fontFamily
               onClicked: root.requestLogout()
@@ -400,7 +404,7 @@ Panel {
           }
         }
 
-        PanelSeparator { foreground: root.barForeground }
+        PanelSeparator { foreground: root.foreground }
 
         // ── Login ────────────────────────────────────────────────────────
         Column {
@@ -445,7 +449,7 @@ Panel {
             anchors.horizontalCenter: parent.horizontalCenter
             visible: !root.hasQr
             text: "Login"
-            foreground: root.barForeground
+            foreground: root.foreground
             fontFamily: root.fontFamily
             bordered: true
             onClicked: {
@@ -492,7 +496,7 @@ Panel {
               width: ListView.view.width
               implicitHeight: rowText.implicitHeight + Style.space(10)
               height: implicitHeight
-              foreground: root.barForeground
+              foreground: root.foreground
               accent: root.bar ? root.bar.urgent : Color.accent
               hasCursor: root.cursorIndex === chatRow.index
 
@@ -508,7 +512,7 @@ Panel {
                 Text {
                   width: parent.width
                   text: Model.chatTitle(chatRow.modelData)
-                  color: root.barForeground
+                  color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   font.bold: (chatRow.modelData.unread || 0) > 0
@@ -649,8 +653,8 @@ Panel {
                   anchors.left: messageRow.modelData.fromMe ? undefined : parent.left
                   radius: Style.cornerRadius > 0 ? Style.cornerRadius : Style.space(6)
                   color: messageRow.modelData.fromMe
-                    ? Style.selectedFillFor(root.barForeground, root.bar ? root.bar.urgent : Color.accent)
-                    : Style.normalFillFor(root.barForeground, Color.accent)
+                    ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
+                    : Style.normalFillFor(root.foreground, Color.accent)
 
                   Column {
                     id: bubbleContent
@@ -719,7 +723,7 @@ Panel {
                       width: Math.min(implicitWidth, bubbleRow.maxInner)
                       textFormat: Text.StyledText
                       text: Model.formatMessageText(messageRow.modelData.text, root.bar ? root.bar.urgent : Color.accent)
-                      color: root.barForeground
+                      color: root.foreground
                       linkColor: root.bar ? root.bar.urgent : Color.accent
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
@@ -779,7 +783,7 @@ Panel {
               anchors.right: sendButton.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
-              foreground: root.barForeground
+              foreground: root.foreground
               accent: root.bar ? root.bar.urgent : Color.accent
               placeholderText: root.linked ? "Reply\u2026" : "Not connected"
               enabled: root.linked
@@ -803,7 +807,7 @@ Panel {
               iconText: "\uf1d8"
               tooltipText: "Send"
               enabled: root.linked && composer.text.trim().length > 0
-              foreground: root.barForeground
+              foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: root.sendReply()
             }
@@ -819,7 +823,7 @@ Panel {
         focus: opened
         message: "Log out and unlink this device?"
         confirmText: "Log out"
-        foreground: root.barForeground
+        foreground: root.foreground
         fontFamily: root.fontFamily
         onCanceled: root.cancelLogout()
         onConfirmed: root.confirmLogout()
