@@ -71,8 +71,16 @@ let connectGen = 0
 let chatsFlushTimer = null
 let lastStateJson = ''
 let resolvingNames = false
+let refreshInFlight = false
 const groupNames = new Map()
 const wantedChats = new Set()
+const APP_STATE_COLLECTIONS = [
+  'critical_block',
+  'critical_unblock_low',
+  'regular_high',
+  'regular_low',
+  'regular'
+]
 
 // Baileys timestamps arrive as number | Long | string depending on where in the
 // protocol they came from.
@@ -129,6 +137,17 @@ function pushChatsSoon() {
     pushChats()
   }, 300)
   chatsFlushTimer.unref?.()
+}
+
+async function pullLatestFromWhatsApp() {
+  if (!sock || connection !== 'open') return false
+  if (typeof sock.resyncAppState === 'function') {
+    await sock.resyncAppState(APP_STATE_COLLECTIONS, false)
+  }
+  if (typeof sock.cleanDirtyBits === 'function') {
+    await sock.cleanDirtyBits('account_sync')
+  }
+  return true
 }
 
 function sleep(ms) {
@@ -934,6 +953,45 @@ async function handleCommand(payload, reply) {
     case 'chats':
       reply({ t: 'chats', chats: store.chatList(payload.limit || 60), unread: store.totalUnread() })
       return
+
+    case 'refresh': {
+      const limit = payload.limit || 60
+      const messageLimit = payload.messageLimit || 60
+      const jid = payload.jid ? String(payload.jid) : ''
+      if (!refreshInFlight && sock && connection === 'open') {
+        refreshInFlight = true
+        try {
+          await pullLatestFromWhatsApp()
+        } catch (err) {
+          logger.debug({ err }, 'refresh: whatsapp sync failed')
+        } finally {
+          refreshInFlight = false
+        }
+      }
+      const chats = store.chatList(limit)
+      const unread = store.totalUnread()
+      pushState()
+      bus.broadcast({ t: 'chats', chats, unread })
+      if (jid) {
+        const canonical = store.canonicalJid(jid) || jid
+        const list = store.messageList(canonical, messageLimit)
+        wantedChats.add(canonical)
+        wantedChats.add(normalizeJid(jid))
+        reply({
+          t: 'messages',
+          jid,
+          chat: store.chat(canonical),
+          messages: list.map(publicMessage),
+          unread
+        })
+        for (const message of list) {
+          if (message.media && !existingMediaPath(message)) media.enqueue(canonical, message)
+        }
+      } else {
+        reply({ t: 'chats', chats, unread })
+      }
+      return
+    }
 
     case 'messages':
       if (!payload.jid) throw new Error('messages: jid required')

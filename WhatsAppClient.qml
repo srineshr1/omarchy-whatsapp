@@ -81,6 +81,14 @@ Item {
   function refresh() { request({ t: "hello" }) }
   function requestChats(limit) { request({ t: "chats", limit: limit || 60 }) }
   function loadMessages(jid, limit) { request({ t: "messages", jid: jid, limit: limit || 60 }) }
+  function refreshInbox(jid, chatLimit, messageLimit) {
+    var payload = { t: "refresh", limit: chatLimit || 60 }
+    if (jid) {
+      payload.jid = jid
+      payload.messageLimit = messageLimit || 60
+    }
+    return request(payload)
+  }
   function markRead(jid) { request({ t: "read", jid: jid }) }
   function reconnectWhatsApp() { request({ t: "reconnect" }) }
   function logout() { request({ t: "logout" }) }
