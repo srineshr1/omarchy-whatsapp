@@ -65,7 +65,9 @@ Panel {
   }
 
   readonly property var visibleChats: {
+    var epoch = root.client ? root.client.chatsEpoch : 0
     var list = root.chats || []
+    if (epoch < 0) return []
     return list.slice(0, Math.max(1, root.chatLimit))
   }
 
@@ -248,7 +250,7 @@ Panel {
 
     function onMessageArrived(jid, message, chat) {
       if (jid !== root.activeJid) return
-      root.activeChat = chat
+      if (chat) root.activeChat = chat
       root.appendMessage(message)
       // The conversation is on screen, so the message is read the moment it
       // lands rather than sitting as an unread the user has already seen.

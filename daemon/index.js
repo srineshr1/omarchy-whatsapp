@@ -17,7 +17,7 @@ import { logger, waLogger } from './lib/logger.js'
 import { Store, normalizeJid } from './lib/store.js'
 import { Notifier } from './lib/notify.js'
 import { Bus } from './lib/server.js'
-import { extractImage, isGroupJid, isIgnorableChat, isSilent, messageText, messageType, prettyJid } from './lib/message.js'
+import { extractImage, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid } from './lib/message.js'
 import { existingMediaPath, MediaCache } from './lib/media.js'
 
 const RECONNECT_BASE_MS = 2000
@@ -183,6 +183,30 @@ function learnAliasesFromMessage(raw) {
   if (key.participantLid && key.participantPn) store.alias(key.participantLid, key.participantPn)
 }
 
+function storedToWaContent(message) {
+  if (!message) return undefined
+  if (message.media) {
+    const node = { mimetype: message.media.mimetype }
+    if (message.text && !isPhotoPlaceholder(message.text)) node.caption = message.text
+    return message.media.kind === 'sticker' ? { stickerMessage: node } : { imageMessage: node }
+  }
+  if (!message.text) return undefined
+  return { conversation: message.text }
+}
+
+async function getStoredMessage(key) {
+  if (!key?.id) return undefined
+  const found = store.findMessage(key.remoteJid, key.id)
+  return storedToWaContent(found)
+}
+
+const RECENT_APPEND_WINDOW_S = 5 * 60
+
+function isRecentIncoming(message) {
+  const ts = message?.ts || 0
+  return ts >= Math.max(0, startedAt - RECENT_APPEND_WINDOW_S)
+}
+
 // Convert a raw Baileys message into the flat shape the panel renders and the
 // store persists.
 function publicMessage(message) {
@@ -272,12 +296,15 @@ async function resolveGroupName(jid) {
   }
 }
 
-function ingest(chatJid, raw, { live }) {
+function ingest(chatJid, raw) {
   if (isIgnorableChat(chatJid)) return null
   if (isSilent(raw.message)) return null
 
   learnAliasesFromMessage(raw)
-  const canonicalTarget = store.canonicalJid(chatJid) || chatJid
+  const hintedPn = raw?.key?.remoteJidAlt || raw?.key?.senderPn
+  if (hintedPn) store.alias(chatJid, hintedPn)
+  const canonicalTarget = store.canonicalJid(chatJid) || store.canonicalJid(hintedPn) || chatJid
+  if (String(canonicalTarget).endsWith('@lid')) scheduleLidResolve(canonicalTarget)
 
   const message = flatten(canonicalTarget, raw)
   if (!message.ts) message.ts = Math.floor(Date.now() / 1000)
@@ -298,33 +325,13 @@ function ingest(chatJid, raw, { live }) {
 
   resolveGroupName(canonicalTarget)
 
-  if (message.fromMe) {
-    store.setUnread(canonicalTarget, 0)
-  } else if (live && !existed) {
-    const currentUnread = chat.unread || 0
-    const now = Date.now()
-    if (currentUnread === 0) {
-      store.setUnread(canonicalTarget, 1)
-    } else if (currentUnread === 1 && chat.lastUnreadSync && (now - chat.lastUnreadSync < 5000)) {
-      // chats.update or metadata sync already set unread to 1 for this incoming message
-      store.setUnread(canonicalTarget, 1)
-    } else {
-      store.bumpUnread(canonicalTarget)
-    }
-    chat.lastUnreadSync = now
-
-    if (message.ts >= startedAt) {
-      const title = chat.isGroup ? (chat.name || 'Group') : (message.senderName || chat.name)
-      const body = chat.isGroup ? `${message.senderName}: ${message.text}` : message.text
-      notifier.queue({ jid: canonicalTarget, title, body, muted: !!chat.muted })
-    }
-  }
+  if (message.fromMe) store.setUnread(canonicalTarget, 0)
 
   const chatKey = normalizeJid(canonicalTarget)
-  if (message.media && !message.imagePath && (live || wantedChats.has(chatKey) || wantedChats.has(canonicalTarget))) {
+  if (message.media && !message.imagePath && (wantedChats.has(chatKey) || wantedChats.has(canonicalTarget))) {
     media.enqueue(canonicalTarget, message)
   }
-  return { message, canonicalTarget }
+  return { message, canonicalTarget, existed }
 }
 
 function applyChatMetadata(rawChats) {
@@ -384,6 +391,39 @@ function asLidJid(value) {
   const raw = String(value)
   if (raw.includes('@')) return normalizeJid(raw)
   return `${raw}@lid`
+}
+
+const pendingLidResolves = new Set()
+
+function scheduleLidResolve(jid) {
+  const lid = asLidJid(jid)
+  if (!lid.endsWith('@lid')) return
+  if (store.canonicalJid(lid).endsWith('@s.whatsapp.net')) return
+  if (pendingLidResolves.has(lid)) return
+  pendingLidResolves.add(lid)
+  resolveOneLid(lid)
+    .catch((err) => logger.debug({ err, jid: lid }, 'lid resolve failed'))
+    .finally(() => pendingLidResolves.delete(lid))
+}
+
+async function resolveOneLid(lid) {
+  if (!sock || connection !== 'open') return
+  const query = new USyncQuery().withContactProtocol().withLIDProtocol()
+  query.withUser(new USyncUser().withLid(lid).withId(lid))
+  const result = await sock.executeUSyncQuery(query)
+  let merged = false
+  for (const row of result?.list || []) {
+    const resolvedLid = asLidJid(row.lid || (String(row.id || '').endsWith('@lid') ? row.id : ''))
+    const pn = String(row.id || '').endsWith('@s.whatsapp.net') ? row.id : ''
+    if (resolvedLid && pn) {
+      store.alias(resolvedLid, pn)
+      merged = true
+    }
+  }
+  if (merged) {
+    store.applyNamesToChats()
+    pushChats()
+  }
 }
 
 async function resolveContactLids() {
@@ -639,7 +679,9 @@ async function connect() {
       connectTimeoutMs: 30000,
       defaultQueryTimeoutMs: 30000,
       // Link previews and media thumbnails are never rendered here.
-      shouldSyncHistoryMessage: () => true
+      shouldSyncHistoryMessage: () => true,
+      // Lets Baileys retry / poll-decrypt using messages we already stored.
+      getMessage: getStoredMessage
     })
     const thisSocket = sock
 
@@ -675,8 +717,14 @@ async function connect() {
         pushState()
         pushChats()
         setTimeout(() => {
+          pullLatestFromWhatsApp()
+            .catch((err) => logger.debug({ err }, 'startup resync failed'))
+            .finally(() => {
+              pushState()
+              pushChats()
+            })
           resolveContactLids().catch((err) => logger.debug({ err }, 'contact resolve failed'))
-        }, 1500).unref?.()
+        }, 800).unref?.()
         return
       }
 
@@ -755,7 +803,7 @@ async function connect() {
       applyChatMetadata(chats)
       for (const raw of messages || []) {
         const jid = raw?.key?.remoteJid
-        if (jid) ingest(jid, raw, { live: false })
+        if (jid) ingest(jid, raw)
       }
       logger.info({ chats: chats?.length || 0, messages: messages?.length || 0, isLatest }, 'history sync')
       for (const [jid, list] of store.messages) {
@@ -822,17 +870,33 @@ async function connect() {
 
     sock.ev.on('messages.upsert', ({ messages, type }) => {
       if (sock !== thisSocket) return
-      const live = type === 'notify'
       const before = store.totalUnread()
+      let ingested = false
       for (const raw of messages || []) {
         const jid = raw?.key?.remoteJid
         if (!jid) continue
-        const result = ingest(jid, raw, { live })
+        const result = ingest(jid, raw)
         if (!result) continue
-        const { message, canonicalTarget } = result
-        const existed = !!store.findMessage(canonicalTarget, raw?.key?.id)
-        if (!live && existed) continue
+        ingested = true
+        const { message, canonicalTarget, existed } = result
+        const live = type === 'notify' || (!existed && isRecentIncoming(message))
+        if (live && !existed && !message.fromMe) {
+          const chat = store.chat(canonicalTarget)
+          const currentUnread = chat.unread || 0
+          const now = Date.now()
+          if (currentUnread === 0) store.setUnread(canonicalTarget, 1)
+          else if (!(currentUnread === 1 && chat.lastUnreadSync && (now - chat.lastUnreadSync < 5000))) {
+            store.bumpUnread(canonicalTarget)
+          }
+          chat.lastUnreadSync = now
+          if (message.ts >= startedAt) {
+            const title = chat.isGroup ? (chat.name || 'Group') : (message.senderName || chat.name)
+            const body = chat.isGroup ? `${message.senderName}: ${message.text}` : message.text
+            notifier.queue({ jid: canonicalTarget, title, body, muted: !!chat.muted })
+          }
+        }
         if (!live) continue
+        if (message.media && !message.imagePath) media.enqueue(canonicalTarget, message)
         bus.broadcast({
           t: 'message',
           jid: canonicalTarget,
@@ -842,7 +906,7 @@ async function connect() {
         })
       }
       const unreadChanged = store.totalUnread() !== before
-      pushChatsSoon()
+      if (ingested) pushChatsSoon()
       if (unreadChanged) pushState()
     })
 
@@ -1070,7 +1134,7 @@ async function handleCommand(payload, reply) {
         // generateWAMessage stamps PENDING. relayMessage has already succeeded
         // here, so the server has the stanza — show a single tick immediately.
         if (asStatus(sent.status) < MSG_SERVER_ACK) sent.status = MSG_SERVER_ACK
-        const res = ingest(rawJid, sent, { live: false })
+        const res = ingest(rawJid, sent)
         if (res) {
           const { message, canonicalTarget } = res
           if ((message.status || 0) < MSG_SERVER_ACK) {
