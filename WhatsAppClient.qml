@@ -37,6 +37,7 @@ Item {
   property var me: null
   property string lastError: ""
   property var chats: []
+  property int chatsEpoch: 0
   property string lastSocketError: ""
   property bool pendingLogin: false
 
@@ -94,6 +95,32 @@ Item {
   function logout() { request({ t: "logout" }) }
   function requestPairCode(phone) { request({ t: "pair", phone: phone }) }
   function setTyping(jid, state) { request({ t: "typing", jid: jid, state: state }) }
+
+  function setChats(list) {
+    root.chats = list || []
+    root.chatsEpoch = root.chatsEpoch + 1
+  }
+
+  function upsertChatPreview(chat) {
+    if (!chat || !chat.jid) return
+    var list = (root.chats || []).slice()
+    var i = -1
+    for (var n = 0; n < list.length; n++) {
+      if (list[n] && list[n].jid === chat.jid) {
+        i = n
+        break
+      }
+    }
+    if (i >= 0) list[i] = chat
+    else list.push(chat)
+    list.sort(function (a, b) {
+      var aPin = a && a.pinned
+      var bPin = b && b.pinned
+      if (!!bPin !== !!aPin) return bPin ? 1 : -1
+      return (b.lastTs || 0) - (a.lastTs || 0)
+    })
+    root.setChats(list)
+  }
 
   function sendMessage(jid, text, quotedId) {
     if (!jid || !text || !text.length) return false
@@ -180,12 +207,12 @@ Item {
         root.unread = frame.unread || 0
         root.me = frame.me || null
         root.lastError = frame.lastError || ""
-        if (frame.chats !== undefined) root.chats = frame.chats || []
+        if (frame.chats !== undefined) root.setChats(frame.chats || [])
         if (root.linked) root.pendingLogin = false
         break
 
       case "chats":
-        root.chats = frame.chats || []
+        root.setChats(frame.chats || [])
         if (frame.unread !== undefined) root.unread = frame.unread || 0
         break
 
@@ -195,6 +222,7 @@ Item {
 
       case "message":
         if (frame.unread !== undefined) root.unread = frame.unread || 0
+        if (frame.chat) root.upsertChatPreview(frame.chat)
         root.messageArrived(frame.jid || "", frame.message || null, frame.chat || null)
         break
 
