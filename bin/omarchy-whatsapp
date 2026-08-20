@@ -30,7 +30,7 @@ case $command in
 login) exec "$WA_BIN_DIR/omarchy-whatsapp-login" "$@" ;;
 open) exec "$WA_BIN_DIR/omarchy-whatsapp-open" "$@" ;;
 focus) exec "$WA_BIN_DIR/omarchy-whatsapp-focus" "$@" ;;
-status | send | logout | reconnect | read | chats | messages | pair | ping)
+status | send | logout | reconnect | read | chats | refresh | messages | pair | ping)
   exec "$WA_BIN_DIR/omarchy-whatsapp-ctl" "$command" "$@"
   ;;
 ctl) exec "$WA_BIN_DIR/omarchy-whatsapp-ctl" "$@" ;;

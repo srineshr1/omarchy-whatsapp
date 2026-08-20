@@ -29,6 +29,7 @@ Panel {
   property string statusLine: ""
   property bool pinToLatest: true
   property bool logoutConfirmOpen: false
+  property bool refreshing: false
   property string peekImagePath: ""
   readonly property bool peekActive: peekImagePath.length > 0
 
@@ -152,6 +153,33 @@ Panel {
     webLauncher.running = true
   }
 
+  function finishRefresh() {
+    refreshWatchdog.stop()
+    root.refreshing = false
+    if (root.statusLine === "Refreshing\u2026") root.statusLine = ""
+  }
+
+  function refreshChats() {
+    if (!root.client || root.showLogin || root.refreshing) return
+    if (!root.client.linkUp) {
+      root.statusLine = "Daemon offline"
+      return
+    }
+    root.refreshing = true
+    root.statusLine = "Refreshing\u2026"
+    var ok = root.client.refreshInbox(
+      root.view === "chat" ? root.activeJid : "",
+      root.chatLimit,
+      root.messageLimit
+    )
+    if (!ok) {
+      root.refreshing = false
+      root.statusLine = "Not connected"
+      return
+    }
+    refreshWatchdog.restart()
+  }
+
   function keepMessagePlace(fn) {
     var atEnd = messageList.atYEnd || root.pinToLatest
     var y = messageList.contentY
@@ -212,6 +240,11 @@ Panel {
       root.pinToLatest = true
       root.messages = messages || []
       Qt.callLater(function () { messageList.positionViewAtEnd() })
+      if (root.refreshing) root.finishRefresh()
+    }
+
+    function onChatsChanged() {
+      if (root.refreshing && root.view !== "chat") root.finishRefresh()
     }
 
     function onMessageArrived(jid, message, chat) {
@@ -235,6 +268,18 @@ Panel {
 
     function onCommandFailed(command, message) {
       if (command === "send") root.statusLine = message
+      if (command === "refresh") {
+        root.refreshing = false
+        refreshWatchdog.stop()
+        if (message && message.indexOf("unknown command") !== -1 && root.client) {
+          root.client.requestChats(root.chatLimit)
+          if (root.view === "chat" && root.activeJid)
+            root.client.loadMessages(root.activeJid, root.messageLimit)
+          root.statusLine = ""
+          return
+        }
+        root.statusLine = message || "Refresh failed"
+      }
     }
   }
 
@@ -270,6 +315,13 @@ Panel {
     onTriggered: if (root.client && root.activeJid) root.client.setTyping(root.activeJid, "paused")
   }
 
+  Timer {
+    id: refreshWatchdog
+    interval: 8000
+    repeat: false
+    onTriggered: root.finishRefresh()
+  }
+
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
@@ -295,6 +347,9 @@ Panel {
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onMoveRequested: function (dx, dy) { root.moveCursor(dy) }
       onActivateRequested: root.activateCursor()
+      onTextKey: function (text) {
+        if (text === "r" || text === "R") root.refreshChats()
+      }
 
       Column {
         id: content
@@ -380,6 +435,16 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
+
+            PanelActionButton {
+              visible: !root.showLogin
+              iconText: "\uf021"
+              tooltipText: root.view === "chat" ? "Refresh this conversation" : "Refresh chats"
+              enabled: root.linked && !root.refreshing
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.refreshChats()
+            }
 
             PanelActionButton {
               iconText: "\uf24d"

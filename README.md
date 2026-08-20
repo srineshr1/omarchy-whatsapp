@@ -79,6 +79,7 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 |--------|-----|
 | Open the panel | Click the bar icon |
 | Move through chats | `j` / `k` or arrow keys |
+| Refresh chats | Refresh button, or `r` |
 | Open a chat | `Enter` |
 | Reply | Type, then `Enter` |
 | Back to the chat list | `Escape` |
@@ -96,6 +97,7 @@ conversation is open are marked read immediately.
 omarchy-whatsapp status                          # connection, account, unread
 omarchy-whatsapp send 919812345678@s.whatsapp.net "on my way"
 omarchy-whatsapp chats 10                        # recent chats as JSON
+omarchy-whatsapp refresh                         # resync the chat list from WhatsApp
 omarchy-whatsapp focus 919812345678@s.whatsapp.net   # open the panel on a chat
 omarchy-whatsapp open                            # full web client
 omarchy-whatsapp restart | logs | logout

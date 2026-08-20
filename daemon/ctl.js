@@ -11,6 +11,7 @@ const USAGE = `Usage: omarchy-whatsapp-ctl <command> [args]
 
   status                 connection state, linked account, unread count
   chats [limit]          most recent chats as JSON
+  refresh [jid] [limit]  resync chats from WhatsApp, then dump the list
   messages <jid> [limit] a chat's recent messages as JSON
   send <jid> <text...>   send a text message
   read <jid>             mark a chat read
@@ -35,6 +36,8 @@ function buildRequest() {
       return { t: 'ping' }
     case 'chats':
       return { t: 'chats', limit: Number(args[0]) || 40 }
+    case 'refresh':
+      return { t: 'refresh', jid: args[0] || undefined, limit: Number(args[1]) || 40 }
     case 'messages':
       if (!args[0]) fail('messages: jid required')
       return { t: 'messages', jid: args[0], limit: Number(args[1]) || 60 }
