@@ -321,7 +321,12 @@ export class Store {
     const list = this.messages.get(key) || []
     const existing = list.findIndex((m) => m.id === message.id)
     if (existing !== -1) {
-      list[existing] = { ...list[existing], ...message }
+      const prev = list[existing]
+      const merged = { ...prev, ...message }
+      // Receipts and our own send ack can race with Baileys' PENDING upsert.
+      // Never let a later event rewind a tick (clock → sent → delivered → read).
+      merged.status = Math.max(prev.status || 0, message.status || 0)
+      list[existing] = merged
     } else {
       list.push(message)
       list.sort((a, b) => (a.ts || 0) - (b.ts || 0))
