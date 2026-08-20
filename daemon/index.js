@@ -44,6 +44,13 @@ const PRINT_QR = process.env.OMARCHY_WHATSAPP_PRINT_QR === '1'
 // would be noise.
 const startedAt = Math.floor(Date.now() / 1000)
 
+// proto.WebMessageInfo.Status: 0 error, 1 pending, 2 server, 3 delivered, 4 read, 5 played.
+const MSG_PENDING = 1
+const MSG_SERVER_ACK = 2
+const MSG_DELIVERED = 3
+const MSG_READ = 4
+const MSG_PLAYED = 5
+
 const store = new Store()
 const notifier = new Notifier()
 const media = new MediaCache()
@@ -184,6 +191,45 @@ function publicMessage(message) {
   return rest
 }
 
+function asStatus(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (value && typeof value.toNumber === 'function') {
+    const n = value.toNumber()
+    return Number.isFinite(n) ? n : 0
+  }
+  const n = Number(value)
+  return Number.isFinite(n) ? n : 0
+}
+
+function statusFromReceipt(receipt) {
+  if (!receipt || typeof receipt !== 'object') return 0
+  const type = receipt.receiptType || receipt.type
+  if (receipt.readTimestamp || type === 'read' || type === 'read-self') return MSG_READ
+  if (type === 'played') return MSG_PLAYED
+  if (type === 'sender') return MSG_SERVER_ACK
+  if (receipt.receiptTimestamp || type === undefined || type === 'inactive' || type === 'peer_msg') {
+    return MSG_DELIVERED
+  }
+  return 0
+}
+
+function applyMessageStatus(jid, id, status) {
+  const next = asStatus(status)
+  if (!id || next < MSG_PENDING) return false
+  const canonical = store.canonicalJid(jid) || normalizeJid(jid) || jid
+  const found = store.findMessage(canonical, id)
+  if (!found) return false
+  if (next <= (found.status || 0)) return false
+  found.status = next
+  store.markDirty()
+  const chatJid = store.canonicalJid(found.key?.remoteJid) || found.key?.remoteJid || canonical
+  bus.broadcast({ t: 'messageStatus', jid: chatJid, id, status: next })
+  if (chatJid !== canonical) {
+    bus.broadcast({ t: 'messageStatus', jid: canonical, id, status: next })
+  }
+  return true
+}
+
 function flatten(chatJid, message) {
   const ts = toTs(message.messageTimestamp)
   const image = extractImage(message.message)
@@ -196,7 +242,7 @@ function flatten(chatJid, message) {
     type: messageType(message.message),
     senderName: senderNameFor(chatJid, message),
     senderJid: message.key?.participant ? jidNormalizedUser(message.key.participant) : '',
-    status: typeof message.status === 'number' ? message.status : 0,
+    status: asStatus(message.status),
     key: {
       remoteJid: message.key?.remoteJid || chatJid,
       id: message.key?.id || '',
@@ -817,13 +863,8 @@ async function connect() {
 
         const id = update?.key?.id || update?.id
         if (!id) continue
-        const found = store.findMessage(canonical, id)
-        if (!found) continue
-        const status = typeof u.status === 'number' ? u.status : (u.readTimestamp ? 4 : 0)
-        if (!status || status < (found.status || 0)) continue
-        found.status = status
-        store.markDirty()
-        bus.broadcast({ t: 'messageStatus', jid: found.key?.remoteJid || canonical, id, status })
+        const status = asStatus(u.status) || (u.readTimestamp ? MSG_READ : 0)
+        applyMessageStatus(canonical, id, status)
       }
       if (unreadCleared || store.totalUnread() !== before) {
         pushChatsSoon()
@@ -851,13 +892,7 @@ async function connect() {
 
         const id = update?.key?.id
         if (!id) continue
-        const found = store.findMessage(canonical, id)
-        if (!found) continue
-        const next = receipt.readTimestamp ? 4 : (receipt.receiptTimestamp ? 3 : 0)
-        if (!next || next < (found.status || 0)) continue
-        found.status = next
-        store.markDirty()
-        bus.broadcast({ t: 'messageStatus', jid: found.key?.remoteJid || canonical, id, status: next })
+        applyMessageStatus(canonical, id, statusFromReceipt(receipt))
       }
       if (unreadCleared || store.totalUnread() !== before) {
         pushChatsSoon()
@@ -1032,10 +1067,18 @@ async function handleCommand(payload, reply) {
 
       const sent = await sock.sendMessage(rawJid, { text }, options)
       if (sent) {
+        // generateWAMessage stamps PENDING. relayMessage has already succeeded
+        // here, so the server has the stanza — show a single tick immediately.
+        if (asStatus(sent.status) < MSG_SERVER_ACK) sent.status = MSG_SERVER_ACK
         const res = ingest(rawJid, sent, { live: false })
         if (res) {
           const { message, canonicalTarget } = res
+          if ((message.status || 0) < MSG_SERVER_ACK) {
+            message.status = MSG_SERVER_ACK
+            store.upsertMessage(canonicalTarget, message)
+          }
           bus.broadcast({ t: 'message', jid: rawJid, message: publicMessage(message), chat: store.chat(canonicalTarget), unread: store.totalUnread() })
+          applyMessageStatus(canonicalTarget, message.id, MSG_SERVER_ACK)
           pushChats()
         }
       }

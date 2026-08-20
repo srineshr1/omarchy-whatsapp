@@ -180,26 +180,25 @@ Panel {
     refreshWatchdog.restart()
   }
 
-  function keepMessagePlace(fn) {
-    var atEnd = messageList.atYEnd || root.pinToLatest
-    var y = messageList.contentY
-    fn()
-    Qt.callLater(function () {
-      if (atEnd) {
-        root.pinToLatest = true
-        messageList.positionViewAtEnd()
-      } else {
-        messageList.contentY = y
-      }
-    })
-  }
-
   function patchMessage(messageId, fields) {
     var list = root.messages.slice()
     for (var i = 0; i < list.length; i++) {
       if (list[i].id === messageId) {
-        list[i] = Object.assign({}, list[i], fields)
-        root.keepMessagePlace(function () { root.messages = list })
+        var next = Object.assign({}, list[i], fields)
+        if (fields.status !== undefined)
+          next.status = Math.max(list[i].status || 0, fields.status || 0)
+        list[i] = next
+        var atEnd = messageList.atYEnd || root.pinToLatest
+        var y = messageList.contentY
+        root.messages = list
+        Qt.callLater(function () {
+          if (atEnd) {
+            root.pinToLatest = true
+            messageList.positionViewAtEnd()
+          } else {
+            messageList.contentY = y
+          }
+        })
         return true
       }
     }
@@ -257,7 +256,8 @@ Panel {
     }
 
     function onMessageStatusChanged(jid, messageId, status) {
-      if (jid !== root.activeJid) return
+      // Receipt JIDs are often a LID or device-suffixed form that does not
+      // equal activeJid. Apply by message id in the open thread.
       root.patchMessage(messageId, { status: status })
     }
 
