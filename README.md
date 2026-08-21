@@ -107,6 +107,10 @@ omarchy-whatsapp uninstall                       # service, CLI, credentials
 The first widget start (or `omarchy-whatsapp setup`) links these into
 `~/.local/bin`. `omarchy-whatsapp-ctl -h` lists the raw daemon commands.
 
+Disabling the bar plugin also disables and stops the `omarchy-whatsapp` user
+service. Re-enabling the plugin starts it again when `autostartDaemon` is
+enabled.
+
 ## Settings
 
 Per-widget settings live inline on the bar entry in `~/.config/omarchy/shell.json`

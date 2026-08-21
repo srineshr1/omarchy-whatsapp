@@ -8,7 +8,7 @@ PartOf=graphical-session.target
 Type=simple
 # @PLUGIN_DIR@ is rewritten by install.sh to the installed plugin directory.
 ExecStart=@PLUGIN_DIR@/bin/omarchy-whatsapp-daemon
-Restart=always
+Restart=on-failure
 RestartSec=5
 # The bridge only needs the network, the state dir, and a notification bus.
 PrivateTmp=yes

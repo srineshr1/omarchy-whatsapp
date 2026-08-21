@@ -1,4 +1,5 @@
 import { chmodSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import makeWASocket, {
   Browsers,
@@ -19,6 +20,7 @@ import { Notifier } from './lib/notify.js'
 import { Bus } from './lib/server.js'
 import { extractImage, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid } from './lib/message.js'
 import { existingMediaPath, MediaCache } from './lib/media.js'
+import { watchPluginState as observePluginState } from './lib/plugin-state.js'
 
 const RECONNECT_BASE_MS = 2000
 const RECONNECT_MAX_MS = 60000
@@ -1236,16 +1238,34 @@ async function handleCommand(payload, reply) {
   }
 }
 
+let closePluginStateWatch = () => {}
+
 function shutdown(signal) {
   if (stopping) return
   stopping = true
   logger.info({ signal }, 'shutting down')
   cancelReconnect()
+  closePluginStateWatch()
   notifier.cancelAll()
   store.persist()
   bus.close()
   destroySocket('shutdown')
   setTimeout(() => process.exit(0), 200).unref?.()
+}
+
+function stopWhenPluginIsDisabled() {
+  logger.info('plugin disabled; stopping the WhatsApp service')
+  const stopper = spawn(
+    'systemctl',
+    ['--user', 'disable', '--now', 'omarchy-whatsapp.service'],
+    { detached: true, stdio: 'ignore' }
+  )
+  stopper.unref()
+  shutdown('plugin-disabled')
+}
+
+function startPluginStateWatch() {
+  closePluginStateWatch = observePluginState(stopWhenPluginIsDisabled)
 }
 
 // A killed daemon leaves versioned QR images behind. They are useless to the
@@ -1283,6 +1303,8 @@ function claimPid() {
 
 async function main() {
   ensureDirs()
+  startPluginStateWatch()
+  if (stopping) return
   if (claimPid()) await sleep(1500)
   purgeStaleQrFiles()
   store.load()
