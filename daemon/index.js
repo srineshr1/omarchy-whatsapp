@@ -19,6 +19,7 @@ import { Notifier } from './lib/notify.js'
 import { Bus } from './lib/server.js'
 import { extractImage, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid } from './lib/message.js'
 import { existingMediaPath, MediaCache } from './lib/media.js'
+import { applyChatNotificationPreferences, isChatMuted } from './lib/preferences.js'
 
 const RECONNECT_BASE_MS = 2000
 const RECONNECT_MAX_MS = 60000
@@ -374,12 +375,16 @@ function applyChatMetadata(rawChats) {
       const ts = toTs(raw.conversationTimestamp)
       if (ts > (chat.lastTs || 0)) chat.lastTs = ts
     }
-    if (raw.archived !== undefined) chat.archived = !!raw.archived
-    if (raw.pinned !== undefined) chat.pinned = !!raw.pinned
-    if (raw.muteEndTime !== undefined) {
-      const until = toTs(raw.muteEndTime)
-      chat.muted = until > Math.floor(Date.now() / 1000)
+    applyChatNotificationPreferences(chat, raw)
+    // A message and its app-state preference update can be delivered in the
+    // same buffered batch. If the message queued a toast first, honor the
+    // newly synced mute/archive state before the coalesce timer fires.
+    if (chat.archived || isChatMuted(chat)) {
+      notifier.cancel(chat.jid)
+      notifier.cancel(canonical)
+      if (canonical !== jid) notifier.cancel(jid)
     }
+    if (raw.pinned !== undefined) chat.pinned = !!raw.pinned
   }
   store.applyNamesToChats()
   store.markDirty()
@@ -799,6 +804,7 @@ async function connect() {
 
     sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }) => {
       if (sock !== thisSocket) return
+      const before = store.totalUnread()
       applyContacts(contacts)
       applyChatMetadata(chats)
       for (const raw of messages || []) {
@@ -813,12 +819,15 @@ async function connect() {
         }
       }
       pushChatsSoon()
+      if (store.totalUnread() !== before) pushState()
     })
 
     sock.ev.on('chats.upsert', (chats) => {
       if (sock !== thisSocket) return
+      const before = store.totalUnread()
       applyChatMetadata(chats)
       pushChatsSoon()
+      if (store.totalUnread() !== before) pushState()
     })
 
     sock.ev.on('chats.update', (updates) => {
@@ -892,7 +901,13 @@ async function connect() {
           if (message.ts >= startedAt) {
             const title = chat.isGroup ? (chat.name || 'Group') : (message.senderName || chat.name)
             const body = chat.isGroup ? `${message.senderName}: ${message.text}` : message.text
-            notifier.queue({ jid: canonicalTarget, title, body, muted: !!chat.muted })
+            notifier.queue({
+              jid: canonicalTarget,
+              title,
+              body,
+              muted: isChatMuted(chat),
+              archived: chat.archived === true
+            })
           }
         }
         if (!live) continue

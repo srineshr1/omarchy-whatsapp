@@ -91,6 +91,12 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 Opening a chat marks it read on every device. Messages arriving while a
 conversation is open are marked read immediately.
 
+Desktop alerts and the bar's unread total follow WhatsApp's chat preferences:
+muted chats (including **Always**) and chats that remain archived do not alert
+or add to the total. Timed mutes expire automatically. If WhatsApp is set to
+unarchive a chat when a new message arrives, that now-active chat alerts as
+normal.
+
 ## CLI
 
 ```sh

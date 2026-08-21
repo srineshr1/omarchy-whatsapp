@@ -42,10 +42,10 @@ export class Notifier {
     if (!canNotify) logger.warn('notify: no notify-send on PATH, notifications disabled')
   }
 
-  // `chat` supplies the toast title, `body`/`sender` the text. Called once per
-  // incoming message; the flush decides what actually reaches the screen.
-  queue({ jid, title, body, muted }) {
-    if (!this.enabled || muted) return
+  // Called once per incoming message. Muted/archived chats stop here; the
+  // flush decides what actually reaches the screen for everything else.
+  queue({ jid, title, body, muted, archived }) {
+    if (!this.enabled || muted || archived) return
     const entry = this.pending.get(jid)
     if (entry) {
       entry.title = title

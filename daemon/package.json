@@ -10,7 +10,8 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "baileys": "6.7.24",
