@@ -346,6 +346,20 @@ Item {
     command: ["setsid", root.pluginDir + "/bin/omarchy-whatsapp-daemon"]
   }
 
+  // Omarchy unloads a bar widget when `omarchy plugin disable` removes it from
+  // the bar. The daemon is an external user service, so stop it explicitly;
+  // credentials stay on disk and setup re-enables the unit if the widget is
+  // enabled again.
+  Process {
+    id: daemonStopper
+    command: [root.pluginDir + "/bin/omarchy-whatsapp-stop"]
+  }
+
+  function stopDaemon() {
+    daemonStopper.running = true
+  }
+
   // Always arm the loop: it stops itself as soon as the link is confirmed up.
   Component.onCompleted: retryTimer.start()
+  Component.onDestruction: stopDaemon()
 }

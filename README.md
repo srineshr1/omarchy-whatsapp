@@ -147,6 +147,12 @@ so on. Open the full client for the real thing.
 
 `omarchy-whatsapp logout` unlinks the device and deletes all three.
 
+Disabling the bar widget with `omarchy plugin disable io.github.ricky.whatsapp`
+also stops and disables the WhatsApp user service. Linked-device credentials
+and the chat cache are retained, so enabling the widget again can resume
+without another QR scan. To stop the service and delete local data, use
+`omarchy-whatsapp uninstall` instead.
+
 ## Things worth knowing before you install
 
 - **Baileys is an unofficial WhatsApp Web client.** It is not endorsed by
