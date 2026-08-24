@@ -44,6 +44,51 @@ export function shouldNotifyChat(chat, nowMs = Date.now()) {
   return !!chat && chat.archived !== true && !isChatMuted(chat, nowMs)
 }
 
+/** Milliseconds until a timed mute ends, or null if not a future timed mute. */
+export function muteExpiryDelayMs(chat, nowMs = Date.now()) {
+  if (!chat || !HAS_OWN(chat, 'muteEndTime')) return null
+  const end = normalizeMuteEndTime(chat.muteEndTime)
+  if (end === null || end <= 0 || end === -1) return null
+  const remaining = muteEndTimeMs(end) - nowMs
+  return remaining > 0 ? remaining : 0
+}
+
+// When aliasing LID/PN twins, keep the stronger mute: Always wins, else the
+// later deadline, else a legacy muted boolean.
+export function mergeMutePreferences(primary, secondary, nowMs = Date.now()) {
+  if (!primary) return
+  if (!secondary) {
+    primary.muted = isChatMuted(primary, nowMs)
+    return
+  }
+
+  const primaryEnd = HAS_OWN(primary, 'muteEndTime') ? normalizeMuteEndTime(primary.muteEndTime) : null
+  const secondaryEnd = HAS_OWN(secondary, 'muteEndTime') ? normalizeMuteEndTime(secondary.muteEndTime) : null
+
+  if (primaryEnd === -1 || secondaryEnd === -1) {
+    primary.muteEndTime = -1
+    primary.muted = true
+    return
+  }
+
+  const primaryMs = primaryEnd && primaryEnd > 0 ? muteEndTimeMs(primaryEnd) : 0
+  const secondaryMs = secondaryEnd && secondaryEnd > 0 ? muteEndTimeMs(secondaryEnd) : 0
+
+  if (secondaryMs > primaryMs) {
+    primary.muteEndTime = secondaryEnd
+  } else if (!HAS_OWN(primary, 'muteEndTime') && secondaryMs <= 0 && isChatMuted(secondary, nowMs)) {
+    // Secondary only has a legacy muted flag.
+    if (HAS_OWN(secondary, 'muteEndTime')) primary.muteEndTime = secondaryEnd
+    else {
+      delete primary.muteEndTime
+      primary.muted = true
+      return
+    }
+  }
+
+  primary.muted = isChatMuted(primary, nowMs)
+}
+
 // Apply only fields present in a partial Baileys chat update. Keeping the raw
 // mute deadline lets timed mutes expire locally without waiting for another
 // app-state event from the phone.

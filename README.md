@@ -93,9 +93,10 @@ conversation is open are marked read immediately.
 
 Desktop alerts and the bar's unread total follow WhatsApp's chat preferences:
 muted chats (including **Always**) and chats that remain archived do not alert
-or add to the total. Timed mutes expire automatically. If WhatsApp is set to
-unarchive a chat when a new message arrives, that now-active chat alerts as
-normal.
+or add to the total. Timed mutes expire automatically and refresh the badge.
+If WhatsApp is set to unarchive a chat when a new message arrives, that
+now-active chat alerts as normal. After upgrading, reconnect once so Always
+mutes muted before this fix are rewritten from WhatsApp app-state.
 
 ## CLI
 
@@ -112,6 +113,11 @@ omarchy-whatsapp uninstall                       # service, CLI, credentials
 
 The first widget start (or `omarchy-whatsapp setup`) links these into
 `~/.local/bin`. `omarchy-whatsapp-ctl -h` lists the raw daemon commands.
+
+Disabling the bar plugin also disables and stops the `omarchy-whatsapp` user
+service (the unit uses `Restart=on-failure` so a clean disable exit does not
+come back). Re-enabling the plugin starts it again when `autostartDaemon` is
+enabled.
 
 ## Settings
 
@@ -152,6 +158,12 @@ downloaded — photos and voice notes show as `📷 Photo`, `🎤 Voice message`
 so on. Open the full client for the real thing.
 
 `omarchy-whatsapp logout` unlinks the device and deletes all three.
+
+Disabling the bar widget with `omarchy plugin disable io.github.ricky.whatsapp`
+also stops and disables the WhatsApp user service. Linked-device credentials
+and the chat cache are retained, so enabling the widget again can resume
+without another QR scan. To stop the service and delete local data, use
+`omarchy-whatsapp uninstall` instead.
 
 ## Things worth knowing before you install
 

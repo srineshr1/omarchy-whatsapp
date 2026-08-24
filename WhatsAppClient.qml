@@ -347,5 +347,8 @@ Item {
   }
 
   // Always arm the loop: it stops itself as soon as the link is confirmed up.
+  // Plugin disable is handled by the daemon watching shell.json — do not stop
+  // the shared user service from Component.onDestruction (fires on every bar
+  // rebuild / monitor teardown, not only on disable).
   Component.onCompleted: retryTimer.start()
 }

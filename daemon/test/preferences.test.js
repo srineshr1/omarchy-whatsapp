@@ -4,6 +4,8 @@ import test from 'node:test'
 import {
   applyChatNotificationPreferences,
   isChatMuted,
+  mergeMutePreferences,
+  muteExpiryDelayMs,
   normalizeMuteEndTime,
   shouldNotifyChat
 } from '../lib/preferences.js'
@@ -51,4 +53,19 @@ test('suppresses notifications for either archived or muted chats', () => {
 
 test('normalizes protobuf Long-style mute timestamps', () => {
   assert.equal(normalizeMuteEndTime({ low: -1, high: -1, unsigned: false }), -1)
+})
+
+test('muteExpiryDelayMs returns remaining ms for timed mutes only', () => {
+  assert.equal(muteExpiryDelayMs({ muteEndTime: -1 }, NOW_MS), null)
+  assert.equal(muteExpiryDelayMs({ muted: true }, NOW_MS), null)
+  assert.equal(muteExpiryDelayMs({ muteEndTime: NOW_SECONDS + 60 }, NOW_MS), 60_000)
+  assert.equal(muteExpiryDelayMs({ muteEndTime: NOW_SECONDS - 60 }, NOW_MS), 0)
+})
+
+test('mergeMutePreferences keeps Always over a shorter timed mute', () => {
+  const primary = { muteEndTime: NOW_SECONDS + 60, muted: true }
+  const secondary = { muteEndTime: -1, muted: true }
+  mergeMutePreferences(primary, secondary, NOW_MS)
+  assert.equal(primary.muteEndTime, -1)
+  assert.equal(primary.muted, true)
 })

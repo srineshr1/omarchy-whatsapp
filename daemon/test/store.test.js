@@ -34,3 +34,20 @@ test('alias merge preserves an active mute from the secondary chat', () => {
   assert.equal(canonical.muteEndTime, -1)
   assert.equal(canonical.muted, true)
 })
+
+test('alias merge prefers Always mute over a shorter primary timed mute', () => {
+  const store = new Store()
+  const phone = store.chat('555@s.whatsapp.net')
+  phone.muteEndTime = Math.floor(Date.now() / 1000) + 60
+  phone.muted = true
+
+  const lid = store.chat('123@lid')
+  lid.muteEndTime = -1
+  lid.muted = true
+
+  store.alias('123@lid', '555@s.whatsapp.net')
+
+  const canonical = store.chat('555@s.whatsapp.net')
+  assert.equal(canonical.muteEndTime, -1)
+  assert.equal(canonical.muted, true)
+})

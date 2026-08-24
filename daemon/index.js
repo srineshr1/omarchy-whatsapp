@@ -1,4 +1,5 @@
 import { chmodSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import makeWASocket, {
   Browsers,
@@ -19,7 +20,13 @@ import { Notifier } from './lib/notify.js'
 import { Bus } from './lib/server.js'
 import { extractImage, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid } from './lib/message.js'
 import { existingMediaPath, MediaCache } from './lib/media.js'
-import { applyChatNotificationPreferences, isChatMuted } from './lib/preferences.js'
+import {
+  applyChatNotificationPreferences,
+  isChatMuted,
+  muteExpiryDelayMs,
+  shouldNotifyChat
+} from './lib/preferences.js'
+import { watchPluginState as observePluginState } from './lib/plugin-state.js'
 
 const RECONNECT_BASE_MS = 2000
 const RECONNECT_MAX_MS = 60000
@@ -82,6 +89,8 @@ let resolvingNames = false
 let refreshInFlight = false
 const groupNames = new Map()
 const wantedChats = new Set()
+/** @type {Map<string, NodeJS.Timeout>} */
+const muteExpiryTimers = new Map()
 const APP_STATE_COLLECTIONS = [
   'critical_block',
   'critical_unblock_low',
@@ -89,6 +98,37 @@ const APP_STATE_COLLECTIONS = [
   'regular_low',
   'regular'
 ]
+
+function clearMuteExpiry(jid) {
+  const timer = muteExpiryTimers.get(jid)
+  if (!timer) return
+  clearTimeout(timer)
+  muteExpiryTimers.delete(jid)
+}
+
+// Timed mutes must refresh the bar badge when they elapse, even with no new
+// WhatsApp event. Always mutes (-1) never arm a timer.
+function scheduleMuteExpiry(chat) {
+  if (!chat?.jid) return
+  clearMuteExpiry(chat.jid)
+  const delay = muteExpiryDelayMs(chat)
+  if (delay === null) return
+  if (delay === 0) {
+    chat.muted = false
+    return
+  }
+  const timer = setTimeout(() => {
+    muteExpiryTimers.delete(chat.jid)
+    const current = store.chat(chat.jid)
+    if (!current || isChatMuted(current)) return
+    current.muted = false
+    store.markDirty()
+    pushState()
+    pushChatsSoon()
+  }, Math.min(delay, 2_147_483_647))
+  timer.unref?.()
+  muteExpiryTimers.set(chat.jid, timer)
+}
 
 // Baileys timestamps arrive as number | Long | string depending on where in the
 // protocol they came from.
@@ -376,6 +416,7 @@ function applyChatMetadata(rawChats) {
       if (ts > (chat.lastTs || 0)) chat.lastTs = ts
     }
     applyChatNotificationPreferences(chat, raw)
+    if (raw.muteEndTime !== undefined) scheduleMuteExpiry(chat)
     // A message and its app-state preference update can be delivered in the
     // same buffered batch. If the message queued a toast first, honor the
     // newly synced mute/archive state before the coalesce timer fires.
@@ -905,8 +946,7 @@ async function connect() {
               jid: canonicalTarget,
               title,
               body,
-              muted: isChatMuted(chat),
-              archived: chat.archived === true
+              shouldNotify: () => shouldNotifyChat(store.chat(canonicalTarget))
             })
           }
         }
@@ -1251,16 +1291,36 @@ async function handleCommand(payload, reply) {
   }
 }
 
+let closePluginStateWatch = () => {}
+
 function shutdown(signal) {
   if (stopping) return
   stopping = true
   logger.info({ signal }, 'shutting down')
   cancelReconnect()
+  closePluginStateWatch()
+  for (const jid of [...muteExpiryTimers.keys()]) clearMuteExpiry(jid)
   notifier.cancelAll()
   store.persist()
   bus.close()
   destroySocket('shutdown')
   setTimeout(() => process.exit(0), 200).unref?.()
+}
+
+function stopWhenPluginIsDisabled() {
+  if (stopping) return
+  logger.info('plugin disabled; stopping the WhatsApp service')
+  const stopper = spawn(
+    'systemctl',
+    ['--user', 'disable', '--now', 'omarchy-whatsapp.service'],
+    { detached: true, stdio: 'ignore' }
+  )
+  stopper.unref()
+  shutdown('plugin-disabled')
+}
+
+function startPluginStateWatch() {
+  closePluginStateWatch = observePluginState(stopWhenPluginIsDisabled)
 }
 
 // A killed daemon leaves versioned QR images behind. They are useless to the
@@ -1298,9 +1358,12 @@ function claimPid() {
 
 async function main() {
   ensureDirs()
+  startPluginStateWatch()
+  if (stopping) return
   if (claimPid()) await sleep(1500)
   purgeStaleQrFiles()
   store.load()
+  for (const chat of store.chats.values()) scheduleMuteExpiry(chat)
 
   media.getSocket = () => sock
   media.onReady = (jid, message) => {

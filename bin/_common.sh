@@ -91,6 +91,13 @@ WA_BIN_LINK_DIR="$HOME/.local/bin"
 WA_LIB_DIR="$HOME/.local/lib/omarchy-whatsapp"
 WA_SWEEP_UNIT="omarchy-whatsapp-sweep.service"
 
+wa_stop_service() {
+  # A bar-widget disable unloads the QML component but does not know about
+  # services started by the plugin. Keep the linked-device credentials so a
+  # later re-enable can start the daemon again without another QR scan.
+  systemctl --user disable --now "$WA_UNIT_NAME" >/dev/null 2>&1 || true
+}
+
 wa_ensure_cli() {
   mkdir -p "$WA_BIN_LINK_DIR"
   chmod +x "$WA_BIN_DIR"/* "$WA_DAEMON_DIR/ctl.js" 2>/dev/null || true

@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { storeFile } from './paths.js'
 import { logger } from './logger.js'
 import { isGroupJid, prettyJid } from './message.js'
-import { isChatMuted, shouldNotifyChat } from './preferences.js'
+import { mergeMutePreferences, shouldNotifyChat } from './preferences.js'
 
 const MAX_MESSAGES_PER_CHAT = 200
 const MAX_CHATS = 300
@@ -245,17 +245,7 @@ export class Store {
         chatP.lastSender = chatS.lastSender
       }
       chatP.unread = Math.max(chatP.unread || 0, chatS.unread || 0)
-      const primaryMuted = isChatMuted(chatP)
-      const secondaryMuted = isChatMuted(chatS)
-      if (!primaryMuted && secondaryMuted) {
-        if (Object.prototype.hasOwnProperty.call(chatS, 'muteEndTime')) {
-          chatP.muteEndTime = chatS.muteEndTime
-        } else {
-          // Let isChatMuted use the legacy boolean fallback from old snapshots.
-          delete chatP.muteEndTime
-        }
-      }
-      chatP.muted = primaryMuted || secondaryMuted
+      mergeMutePreferences(chatP, chatS)
       chatP.archived = chatP.archived || chatS.archived
       chatP.pinned = chatP.pinned || chatS.pinned
 

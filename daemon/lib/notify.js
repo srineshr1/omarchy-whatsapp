@@ -42,17 +42,19 @@ export class Notifier {
     if (!canNotify) logger.warn('notify: no notify-send on PATH, notifications disabled')
   }
 
-  // Called once per incoming message. Muted/archived chats stop here; the
-  // flush decides what actually reaches the screen for everything else.
-  queue({ jid, title, body, muted, archived }) {
-    if (!this.enabled || muted || archived) return
+  // Called once per incoming message. Preference checks happen at flush so a
+  // message that auto-unarchives within the coalesce window can still alert.
+  // Pass shouldNotify as a live predicate over store state.
+  queue({ jid, title, body, shouldNotify }) {
+    if (!this.enabled) return
     const entry = this.pending.get(jid)
     if (entry) {
       entry.title = title
       entry.lines.push(body)
+      if (shouldNotify) entry.shouldNotify = shouldNotify
       return
     }
-    const fresh = { title, lines: [body], timer: null }
+    const fresh = { title, lines: [body], timer: null, shouldNotify }
     fresh.timer = setTimeout(() => this.flush(jid), COALESCE_MS)
     fresh.timer.unref?.()
     this.pending.set(jid, fresh)
@@ -63,6 +65,8 @@ export class Notifier {
     if (!entry) return
     this.pending.delete(jid)
     clearTimeout(entry.timer)
+
+    if (typeof entry.shouldNotify === 'function' && !entry.shouldNotify()) return
 
     const body = entry.lines.length > 1
       ? `${entry.lines[entry.lines.length - 1]}\n(+${entry.lines.length - 1} more)`
