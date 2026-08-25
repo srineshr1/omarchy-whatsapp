@@ -58,6 +58,17 @@ export class Store {
     return key
   }
 
+  // Keep phone-number JIDs as the stable UI/storage key, but use a known LID
+  // for protocol operations. WhatsApp is migrating one-to-one chats to LIDs;
+  // sending a migrated chat to its old PN can create a message the recipient
+  // cannot decrypt even though the server accepted it.
+  routingJid(jid) {
+    const key = normalizeJid(jid)
+    if (!key || key.endsWith('@lid') || !key.endsWith('@s.whatsapp.net')) return key
+    const alias = normalizeJid(this.aliases.get(key))
+    return alias.endsWith('@lid') ? alias : key
+  }
+
   load() {
     let raw
     try {
@@ -438,6 +449,30 @@ export class Store {
       if (f) return f
     }
     return null
+  }
+
+  rememberRetryMessage(jid, id, content) {
+    if (!id || !content) return false
+    const message = this.findMessage(jid, id)
+    if (!message) return false
+    message.retryMessage = content
+    this.markDirty()
+    return true
+  }
+
+  retryMessage(key) {
+    const message = this.findMessage(key?.remoteJid, key?.id)
+    if (!message?.fromMe) return undefined
+    if (message.retryMessage) return message.retryMessage
+
+    // Older snapshots predate retryMessage. Text is all this plugin can send,
+    // so reconstructing it lets a late retry heal those messages too.
+    if (!message.text) return undefined
+    if (message.type === 'conversation') return { conversation: message.text }
+    if (message.type === 'extendedTextMessage') {
+      return { extendedTextMessage: { text: message.text } }
+    }
+    return undefined
   }
 
   clear() {

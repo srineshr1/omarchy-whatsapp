@@ -237,6 +237,8 @@ function storedToWaContent(message) {
 
 async function getStoredMessage(key) {
   if (!key?.id) return undefined
+  const retry = store.retryMessage(key)
+  if (retry) return retry
   const found = store.findMessage(key.remoteJid, key.id)
   return storedToWaContent(found)
 }
@@ -252,7 +254,7 @@ function isRecentIncoming(message) {
 // store persists.
 function publicMessage(message) {
   if (!message) return message
-  const { media: _ignored, ...rest } = message
+  const { media: _ignored, retryMessage: _retryMessage, ...rest } = message
   return rest
 }
 
@@ -1177,6 +1179,7 @@ async function handleCommand(payload, reply) {
       if (!sock || connection !== 'open') throw new Error('send: not connected to WhatsApp')
 
       const canonical = store.canonicalJid(rawJid) || rawJid
+      const routingJid = store.routingJid(rawJid) || rawJid
       const options = {}
       if (payload.quoted) {
         const list = store.messages.get(canonical) || []
@@ -1184,18 +1187,19 @@ async function handleCommand(payload, reply) {
         if (quoted?.key) options.quoted = { key: quoted.key, message: { conversation: quoted.text } }
       }
 
-      const sent = await sock.sendMessage(rawJid, { text }, options)
+      const sent = await sock.sendMessage(routingJid, { text }, options)
       if (sent) {
         // generateWAMessage stamps PENDING. relayMessage has already succeeded
         // here, so the server has the stanza — show a single tick immediately.
         if (asStatus(sent.status) < MSG_SERVER_ACK) sent.status = MSG_SERVER_ACK
-        const res = ingest(rawJid, sent)
+        const res = ingest(routingJid, sent)
         if (res) {
           const { message, canonicalTarget } = res
           if ((message.status || 0) < MSG_SERVER_ACK) {
             message.status = MSG_SERVER_ACK
             store.upsertMessage(canonicalTarget, message)
           }
+          store.rememberRetryMessage(canonicalTarget, message.id, sent.message)
           bus.broadcast({ t: 'message', jid: rawJid, message: publicMessage(message), chat: store.chat(canonicalTarget), unread: store.totalUnread() })
           applyMessageStatus(canonicalTarget, message.id, MSG_SERVER_ACK)
           pushChats()
@@ -1218,7 +1222,7 @@ async function handleCommand(payload, reply) {
       }
       const presence = payload.state === 'paused' ? 'paused' : 'composing'
       try {
-        await sock.sendPresenceUpdate(presence, payload.jid)
+        await sock.sendPresenceUpdate(presence, store.routingJid(payload.jid) || payload.jid)
       } catch (err) {
         logger.debug({ err }, 'presence update failed')
       }
