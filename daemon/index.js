@@ -1,8 +1,8 @@
 import { chmodSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
 import { spawn } from 'node:child_process'
+import { hostname, release } from 'node:os'
 import { join } from 'node:path'
 import makeWASocket, {
-  Browsers,
   DisconnectReason,
   fetchLatestBaileysVersion,
   jidNormalizedUser,
@@ -791,7 +791,9 @@ async function connect() {
       // The phone keeps pushing its own notifications while this device stays
       // "offline", so the user never loses phone alerts by linking Omarchy.
       markOnlineOnConnect: false,
-      browser: Browsers.ubuntu('Omarchy'),
+      // WhatsApp displays the first two values as the linked-device name. Do
+      // not claim Ubuntu: Omarchy runs on several Linux distributions.
+      browser: [hostname(), 'Omarchy', release()],
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,
       fireInitQueries: true,
