@@ -28,10 +28,22 @@ const soundFile = [
   '/usr/share/sounds/freedesktop/stereo/message.oga'
 ].find((path) => existsSync(path))
 
-// Single-quote for `sh -c`: the shell hint is executed as a command string, so
-// a jid is escaped even though jids never legitimately contain a quote.
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`
+// Argument order is the contract with omarchy-notification-send: options come
+// first, then the headline and description as positionals, and --exec takes
+// every remaining word as the click argv. So --exec goes last, after the text,
+// and the command it carries is separate words rather than one quoted string.
+export function notificationArgs(title, body, jid, omarchy = useOmarchy) {
+  if (!omarchy) {
+    return ['-a', 'WhatsApp', '-u', 'normal', `--hint=string:omarchy-glyph:${GLYPH}`, title, body]
+  }
+  return [
+    '--app-name', 'WhatsApp',
+    '-u', 'normal',
+    '-g', GLYPH,
+    title,
+    body,
+    ...(jid ? ['--exec', 'bash', focusPath, jid] : [])
+  ]
 }
 
 export class Notifier {
@@ -104,19 +116,7 @@ export class Notifier {
   send(title, body, jid) {
     if (!this.enabled) return
     // Clicking the toast opens the bar panel on the originating chat.
-    const openCommand = jid
-      ? `bash ${shellQuote(focusPath)} ${shellQuote(jid)}`
-      : ''
-    const args = useOmarchy
-      ? [
-        '--app-name', 'WhatsApp',
-        '-u', 'normal',
-        '-g', GLYPH,
-        ...(openCommand ? ['--exec', openCommand] : []),
-        title,
-        body
-      ]
-      : ['-a', 'WhatsApp', '-u', 'normal', `--hint=string:omarchy-glyph:${GLYPH}`, title, body]
+    const args = notificationArgs(title, body, jid)
 
     const command = useOmarchy ? 'omarchy-notification-send' : 'notify-send'
     try {
