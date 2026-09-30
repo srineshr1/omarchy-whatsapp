@@ -79,6 +79,7 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 |--------|-----|
 | Open the panel | Click the bar icon |
 | Move through chats | `j` / `k` or arrow keys |
+| Switch chat list (All, Unread, Favourites, Groups, your lists) | `Tab` / `Shift+Tab`, or click a tab |
 | Refresh chats | Refresh button, or `r` |
 | Open a chat | `Enter` |
 | Reply | Type, then `Enter` |
@@ -87,6 +88,10 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 | Full WhatsApp Web | Right-click the icon, or the ⧉ button in the panel |
 | Log out | Power button on the chat list |
 | Open a chat from a notification | Click the notification |
+
+Pinned chats sit on top in the phone's pin order, and the list tabs mirror
+the Favourites and custom lists from your phone. The daemon reads both from
+WhatsApp's app-state sync on connect and whenever another device changes them.
 
 Opening a chat marks it read on every device. Messages arriving while a
 conversation is open are marked read immediately.
