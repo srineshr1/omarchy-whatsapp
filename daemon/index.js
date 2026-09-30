@@ -217,6 +217,28 @@ function syncLists() {
   return listSyncInFlight
 }
 
+// The phone keys list entries by LID for contacts where it has one.
+function appStateJid(jid) {
+  const canonical = store.canonicalJid(jid) || normalizeJid(jid)
+  if (isGroupJid(canonical)) return canonical
+  for (const [from, to] of store.aliases) {
+    if (from.endsWith('@lid') && store.canonicalJid(to) === canonical) return from
+  }
+  return canonical
+}
+
+// Lists live in the "regular" app-state collection, which Baileys keeps in
+// sync, so its own addChatLabel / removeChatLabel can write them.
+async function setListMember(jid, listId, member) {
+  if (!sock || connection !== 'open') throw new Error('Not connected to WhatsApp')
+  const target = appStateJid(jid)
+  if (member) await sock.addChatLabel(target, listId)
+  else await sock.removeChatLabel(target, listId)
+  store.setListMembership(listId, target, member)
+  pushChats()
+  syncListsSoon()
+}
+
 function syncListsSoon(delay = LIST_SYNC_DEBOUNCE_MS) {
   if (listSyncTimer) clearTimeout(listSyncTimer)
   listSyncTimer = setTimeout(() => {
@@ -1201,6 +1223,25 @@ async function handleCommand(payload, reply) {
       } else {
         reply(frame)
       }
+      return
+    }
+
+    case 'listMember': {
+      try {
+        await setListMember(String(payload.jid || ''), String(payload.listId || ''), payload.member === true)
+        reply(chatsFrame())
+      } catch (err) {
+        logger.warn({ err: err?.message }, 'list change failed')
+        reply({ t: 'error', for: 'listMember', message: err?.message || 'List change failed' })
+      }
+      return
+    }
+
+    case 'pinMove': {
+      const jid = payload.jid ? String(payload.jid) : ''
+      const delta = Number(payload.delta) || 0
+      if (jid && delta && store.movePin(jid, delta)) pushChats()
+      reply(chatsFrame())
       return
     }
 

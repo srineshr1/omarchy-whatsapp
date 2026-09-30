@@ -97,6 +97,10 @@ Item {
   function logout() { request({ t: "logout" }) }
   function requestPairCode(phone) { request({ t: "pair", phone: phone }) }
   function setTyping(jid, state) { request({ t: "typing", jid: jid, state: state }) }
+  function movePin(jid, delta) { return request({ t: "pinMove", jid: jid, delta: delta }) }
+  function setListMember(jid, listId, member) {
+    return request({ t: "listMember", jid: jid, listId: listId, member: member })
+  }
 
   function setChats(list) {
     root.chats = list || []

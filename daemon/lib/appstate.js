@@ -52,22 +52,26 @@ async function decodeRecords(mutations, getKey, onMutation) {
   return skipped
 }
 
+function syncQuery(sock, name, version) {
+  return sock.query({
+    tag: 'iq',
+    attrs: { to: S_WHATSAPP_NET, xmlns: 'w:sync:app:state', type: 'set' },
+    content: [{
+      tag: 'sync',
+      attrs: {},
+      content: [{
+        tag: 'collection',
+        attrs: { name, version: String(version), return_snapshot: String(!version) }
+      }]
+    }]
+  })
+}
+
 async function readCollection(sock, name, getKey, onMutation) {
   let version = 0
   let skipped = 0
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const result = await sock.query({
-      tag: 'iq',
-      attrs: { to: S_WHATSAPP_NET, xmlns: 'w:sync:app:state', type: 'set' },
-      content: [{
-        tag: 'sync',
-        attrs: {},
-        content: [{
-          tag: 'collection',
-          attrs: { name, version: String(version), return_snapshot: String(!version) }
-        }]
-      }]
-    })
+    const result = await syncQuery(sock, name, version)
     const decoded = (await extractSyncdPatches(result))[name]
     if (!decoded) break
     const { patches, hasMorePatches, snapshot } = decoded
@@ -171,3 +175,4 @@ export async function scanAppState(sock, keys, logger) {
     members
   }
 }
+

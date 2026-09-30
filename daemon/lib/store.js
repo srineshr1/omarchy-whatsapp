@@ -53,6 +53,8 @@ export class Store {
     this.listMembers = new Map()
     /** @type {Set<string>} */
     this.favorites = new Set()
+    /** Local-only order of pinned chats (canonical JIDs), set by pinMove. */
+    this.pinOrder = []
     this.me = null
     this._persistTimer = null
     this._dirty = false
@@ -91,6 +93,7 @@ export class Store {
       if (Array.isArray(data.lists)) this.lists = data.lists
       for (const [id, jids] of Object.entries(data.listMembers || {})) this.listMembers.set(id, new Set(jids))
       for (const jid of data.favorites || []) this.favorites.add(jid)
+      if (Array.isArray(data.pinOrder)) this.pinOrder = data.pinOrder
       this.me = data.me || null
       for (const list of this.messages.values()) {
         for (const message of list) {
@@ -145,7 +148,8 @@ export class Store {
       aliases: Object.fromEntries(this.aliases),
       lists: this.lists,
       listMembers: Object.fromEntries([...this.listMembers].map(([id, set]) => [id, [...set]])),
-      favorites: [...this.favorites]
+      favorites: [...this.favorites],
+      pinOrder: this.pinOrder
     }
     const tmp = `${storeFile}.tmp`
     try {
@@ -444,13 +448,36 @@ export class Store {
         list.push(canonicalChat)
       }
     }
-    // Pinned first, most recently pinned on top, like the phone.
+    // Pinned first. Chats the user reordered keep that order; any other pin
+    // (e.g. one pinned since) goes above them, most recently pinned on top,
+    // as on the phone.
+    const order = new Map(this.pinOrder.map((jid, i) => [jid, i]))
     return list.sort((a, b) => {
       const pa = pinRank(a.pinned)
       const pb = pinRank(b.pinned)
-      if (pa !== pb) return pb - pa
+      if ((pa > 0) !== (pb > 0)) return pb > 0 ? 1 : -1
+      if (pa > 0) {
+        const oa = order.has(a.jid) ? order.get(a.jid) : -1
+        const ob = order.has(b.jid) ? order.get(b.jid) : -1
+        if (oa !== ob) return oa - ob
+        if (pa !== pb) return pb - pa
+      }
       return (b.lastTs || 0) - (a.lastTs || 0)
     })
+  }
+
+  /** Move a pinned chat up (delta < 0) or down within the pinned group. */
+  movePin(jid, delta) {
+    const key = this.canonicalJid(jid) || normalizeJid(jid)
+    const pinned = this.sortedChats().filter((c) => pinRank(c.pinned) > 0).map((c) => c.jid)
+    const from = pinned.indexOf(key)
+    if (from < 0) return false
+    const to = Math.max(0, Math.min(pinned.length - 1, from + delta))
+    if (to === from) return false
+    pinned.splice(to, 0, ...pinned.splice(from, 1))
+    this.pinOrder = pinned
+    this.markDirty()
+    return true
   }
 
   _membership() {
@@ -499,6 +526,7 @@ export class Store {
         this.chat(key).pinned = ts
         pinnedJids.push(key)
       }
+      this.pinOrder = this.pinOrder.filter((jid) => pinned.has(jid))
     }
     if (labels) {
       this.lists = labels
@@ -514,8 +542,11 @@ export class Store {
   setListMembership(id, jid, member) {
     if (!this.listMembers.has(id)) this.listMembers.set(id, new Set())
     const set = this.listMembers.get(id)
+    const canonical = this.canonicalJid(jid) || normalizeJid(jid)
+    for (const existing of [...set]) {
+      if ((this.canonicalJid(existing) || existing) === canonical) set.delete(existing)
+    }
     if (member) set.add(jid)
-    else set.delete(jid)
     this.markDirty()
   }
 

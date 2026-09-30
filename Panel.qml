@@ -34,6 +34,11 @@ Panel {
   // Which chat list tab is showing: "all", "unread", "favorites", "groups",
   // or "list:<id>" for one of the user's own WhatsApp lists.
   property string activeList: "all"
+  // List picker (l): which chat it edits and where its cursor is.
+  property bool listPickerOpen: false
+  property string listPickerJid: ""
+  property int listPickerIndex: 0
+  readonly property var customLists: root.client ? (root.client.lists || []) : []
   readonly property bool peekActive: peekImagePath.length > 0
 
   readonly property var chats: client ? client.chats : []
@@ -186,6 +191,53 @@ Panel {
     chatList.positionViewAtIndex(next, ListView.Contain)
   }
 
+  // Shift+Up/Down: move the pinned chat under the cursor within the pinned
+  // group. The order is kept by the daemon and only affects this panel.
+  function movePinnedChat(delta) {
+    if (root.view !== "chats" || !root.client) return
+    var chat = root.chatAt(root.cursorIndex)
+    var target = root.chatAt(root.cursorIndex + delta)
+    if (!chat || !target || (chat.pinned || 0) <= 0 || (target.pinned || 0) <= 0) return
+    if (!root.client.movePin(chat.jid, delta)) return
+    root.cursorIndex = root.cursorIndex + delta
+    chatList.positionViewAtIndex(root.cursorIndex, ListView.Contain)
+  }
+
+  function openListPicker() {
+    if (root.view !== "chats") return
+    var chat = root.chatAt(root.cursorIndex)
+    if (!chat) return
+    if (root.customLists.length === 0) {
+      root.statusLine = "No lists yet; create one on your phone"
+      return
+    }
+    root.listPickerJid = chat.jid
+    root.listPickerIndex = 0
+    root.listPickerOpen = true
+    Qt.callLater(function () { listPicker.forceActiveFocus() })
+  }
+
+  function closeListPicker() {
+    root.listPickerOpen = false
+    Qt.callLater(function () { keyCatcher.forceActiveFocus() })
+  }
+
+  function pickerChat() {
+    var list = root.chats || []
+    for (var i = 0; i < list.length; i++)
+      if (list[i].jid === root.listPickerJid) return list[i]
+    return null
+  }
+
+  function toggleListMembership(index) {
+    var list = root.customLists[index]
+    var chat = root.pickerChat()
+    if (!list || !chat || !root.client) return
+    var member = (chat.lists || []).indexOf(list.id) !== -1
+    root.statusLine = (member ? "Removing from " : "Adding to ") + list.name + "\u2026"
+    if (!root.client.setListMember(chat.jid, list.id, !member)) root.statusLine = "Daemon offline"
+  }
+
   function activateCursor() {
     if (root.view !== "chats") return
     var chat = root.chatAt(root.cursorIndex)
@@ -302,6 +354,7 @@ Panel {
 
     function onChatsChanged() {
       if (root.refreshing && root.view !== "chat") root.finishRefresh()
+      if (/^(Adding to|Removing from)/.test(root.statusLine)) root.statusLine = ""
     }
 
     function onMessageArrived(jid, message, chat) {
@@ -325,7 +378,7 @@ Panel {
     }
 
     function onCommandFailed(command, message) {
-      if (command === "send") root.statusLine = message
+      if (command === "send" || command === "listMember") root.statusLine = message
       if (command === "refresh") {
         root.refreshing = false
         refreshWatchdog.stop()
@@ -394,7 +447,7 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       // Composer, logout confirm, and image peek own keys while they are up.
-      blocked: composer.activeFocus || root.logoutConfirmOpen || root.peekActive
+      blocked: composer.activeFocus || root.logoutConfirmOpen || root.peekActive || root.listPickerOpen
 
       onCloseRequested: {
         if (root.peekActive) root.peekImagePath = ""
@@ -411,6 +464,25 @@ Panel {
       onActivateRequested: root.activateCursor()
       onTextKey: function (text) {
         if (text === "r" || text === "R") root.refreshChats()
+      }
+
+      // PanelKeyCatcher reports Shift+Up/Down as plain Up/Down and takes "l"
+      // as "move right", so these are shortcuts, which run before item key
+      // handling.
+      Shortcut {
+        sequences: ["Shift+Up", "Shift+K"]
+        enabled: root.opened && root.view === "chats" && !keyCatcher.blocked
+        onActivated: root.movePinnedChat(-1)
+      }
+      Shortcut {
+        sequences: ["Shift+Down", "Shift+J"]
+        enabled: root.opened && root.view === "chats" && !keyCatcher.blocked
+        onActivated: root.movePinnedChat(1)
+      }
+      Shortcut {
+        sequence: "L"
+        enabled: root.opened && root.view === "chats" && !keyCatcher.blocked
+        onActivated: root.openListPicker()
       }
 
       Column {
@@ -746,8 +818,11 @@ Panel {
                   Text {
                     id: stamp
                     anchors.right: parent.right
-                    text: ((chatRow.modelData.pinned || 0) > 0 ? "\uf08d " : "")
-                      + Model.chatTimestamp(chatRow.modelData.lastTs)
+                    text: {
+                      var stampText = Model.chatTimestamp(chatRow.modelData.lastTs)
+                      if ((chatRow.modelData.pinned || 0) <= 0) return stampText
+                      return stampText.length > 0 ? stampText + " \uf08d" : "\uf08d"
+                    }
                     color: root.secondaryForeground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -786,6 +861,18 @@ Panel {
               }
             }
           }
+        }
+
+        // ── Key hints ────────────────────────────────────────────────────
+        Text {
+          width: parent.width
+          visible: !root.showLogin && root.view === "chats"
+          horizontalAlignment: Text.AlignHCenter
+          text: "tab lists \u00b7 \u21e7\u2191\u2193 reorder pins \u00b7 l edit lists \u00b7 r refresh"
+          color: root.secondaryForeground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
         }
 
         // ── Conversation ─────────────────────────────────────────────────
@@ -1019,6 +1106,101 @@ Panel {
               fontFamily: root.fontFamily
               onClicked: root.sendReply()
             }
+          }
+        }
+      }
+
+      // ── List picker (l) ────────────────────────────────────────────────
+      Rectangle {
+        id: listPicker
+        visible: root.listPickerOpen
+        anchors.fill: parent
+        z: 10
+        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.94)
+        focus: root.listPickerOpen
+
+        Keys.onPressed: function (event) {
+          var count = root.customLists.length
+          if (event.key === Qt.Key_Escape || event.text === "l" || event.text === "q") {
+            root.closeListPicker()
+          } else if (event.key === Qt.Key_Down || event.text === "j") {
+            root.listPickerIndex = Math.min(count - 1, root.listPickerIndex + 1)
+          } else if (event.key === Qt.Key_Up || event.text === "k") {
+            root.listPickerIndex = Math.max(0, root.listPickerIndex - 1)
+          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+            root.toggleListMembership(root.listPickerIndex)
+          } else {
+            return
+          }
+          event.accepted = true
+        }
+
+        MouseArea { anchors.fill: parent; onClicked: root.closeListPicker() }
+
+        Column {
+          anchors.centerIn: parent
+          width: Math.min(parent.width - Style.space(40), Style.space(260))
+          spacing: Style.space(4)
+
+          Text {
+            width: parent.width
+            text: {
+              var chat = root.pickerChat()
+              return "Lists for " + (chat ? Model.chatTitle(chat) : "")
+            }
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            elide: Text.ElideRight
+          }
+
+          Repeater {
+            model: root.customLists
+
+            CursorSurface {
+              id: pickerRow
+              required property var modelData
+              required property int index
+              readonly property bool member: {
+                var chat = root.pickerChat()
+                return chat !== null && (chat.lists || []).indexOf(pickerRow.modelData.id) !== -1
+              }
+
+              width: parent.width
+              height: pickerLabel.implicitHeight + Style.space(10)
+              foreground: root.foreground
+              accent: root.bar ? root.bar.urgent : Color.accent
+              hasCursor: root.listPickerIndex === pickerRow.index
+
+              Text {
+                id: pickerLabel
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                text: (pickerRow.member ? "\uf14a  " : "\uf096  ") + pickerRow.modelData.name
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onContainsMouseChanged: if (containsMouse) root.listPickerIndex = pickerRow.index
+                onClicked: root.toggleListMembership(pickerRow.index)
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: "\u21b5 toggle  \u00b7  esc done"
+            color: root.secondaryForeground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
           }
         }
       }
