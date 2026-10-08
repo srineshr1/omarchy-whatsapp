@@ -28,10 +28,24 @@ const soundFile = [
   '/usr/share/sounds/freedesktop/stereo/message.oga'
 ].find((path) => existsSync(path))
 
-// Single-quote for `sh -c`: the shell hint is executed as a command string, so
-// a jid is escaped even though jids never legitimately contain a quote.
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`
+// `omarchy-notification-send` takes the headline and description as positionals
+// and treats `--exec` as a terminator that consumes the rest of the line as the
+// click command's argv. So `--exec` has to come last, spelled as separate words:
+// passed any earlier the script reaches the headline while still in option
+// position and exits 1, losing the toast while the sound still plays.
+export function buildNotifyArgs({ title, body, jid, useOmarchy: omarchy }) {
+  if (!omarchy) {
+    return ['-a', 'WhatsApp', '-u', 'normal', `--hint=string:omarchy-glyph:${GLYPH}`, title, body]
+  }
+  return [
+    '--app-name', 'WhatsApp',
+    '-u', 'normal',
+    '-g', GLYPH,
+    title,
+    body,
+    // Clicking the toast opens the bar panel on the originating chat.
+    ...(jid ? ['--exec', 'bash', focusPath, jid] : [])
+  ]
 }
 
 export class Notifier {
@@ -103,25 +117,16 @@ export class Notifier {
 
   send(title, body, jid) {
     if (!this.enabled) return
-    // Clicking the toast opens the bar panel on the originating chat.
-    const openCommand = jid
-      ? `bash ${shellQuote(focusPath)} ${shellQuote(jid)}`
-      : ''
-    const args = useOmarchy
-      ? [
-        '--app-name', 'WhatsApp',
-        '-u', 'normal',
-        '-g', GLYPH,
-        ...(openCommand ? ['--exec', openCommand] : []),
-        title,
-        body
-      ]
-      : ['-a', 'WhatsApp', '-u', 'normal', `--hint=string:omarchy-glyph:${GLYPH}`, title, body]
-
+    const args = buildNotifyArgs({ title, body, jid, useOmarchy })
     const command = useOmarchy ? 'omarchy-notification-send' : 'notify-send'
     try {
       const child = spawn(command, args, { stdio: 'ignore', detached: true })
       child.on('error', (err) => logger.warn({ err }, 'notify: spawn failed'))
+      // A bad argv makes the helper exit non-zero *after* spawning, which the
+      // error handler never sees. Without this the toast just vanishes silently.
+      child.on('exit', (code) => {
+        if (code) logger.warn({ code, command }, 'notify: helper exited non-zero, no toast shown')
+      })
       child.unref()
     } catch (err) {
       logger.warn({ err }, 'notify: spawn threw')
