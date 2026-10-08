@@ -15,7 +15,8 @@ import QRCode from 'qrcode'
 
 import { authDir, ensureDirs, mediaDir, pidFile, qrPngFileFor, qrTxtFile, socketPath, stateDir } from './lib/paths.js'
 import { logger, waLogger } from './lib/logger.js'
-import { Store, normalizeJid } from './lib/store.js'
+import { Store, normalizeJid, pinRank } from './lib/store.js'
+import { scanAppState } from './lib/appstate.js'
 import { Notifier } from './lib/notify.js'
 import { Bus } from './lib/server.js'
 import { extractImage, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid } from './lib/message.js'
@@ -91,6 +92,13 @@ const groupNames = new Map()
 const wantedChats = new Set()
 /** @type {Map<string, NodeJS.Timeout>} */
 const muteExpiryTimers = new Map()
+// The panel filters by list client-side, so it needs the whole chat pool, not
+// just the first screenful.
+const CHAT_POOL = 300
+const LIST_SYNC_DEBOUNCE_MS = 2000
+let appStateKeys = null
+let listSyncTimer = null
+let listSyncInFlight = null
 const APP_STATE_COLLECTIONS = [
   'critical_block',
   'critical_unblock_low',
@@ -163,7 +171,7 @@ function state() {
 }
 
 function snapshot() {
-  return { ...state(), t: 'state', chats: store.chatList(60) }
+  return { ...state(), t: 'state', chats: store.chatList(CHAT_POOL), lists: store.lists }
 }
 
 function pushState() {
@@ -174,8 +182,70 @@ function pushState() {
   bus.broadcast(next)
 }
 
-function pushChats(limit = 60) {
-  bus.broadcast({ t: 'chats', chats: store.chatList(limit), unread: store.totalUnread() })
+function chatsFrame(limit = CHAT_POOL) {
+  return { t: 'chats', chats: store.chatList(limit), lists: store.lists, unread: store.totalUnread() }
+}
+
+function pushChats(limit = CHAT_POOL) {
+  bus.broadcast(chatsFrame(limit))
+}
+
+// Re-read pins, favourites, and chat lists from WhatsApp's app state. Calls
+// made while a scan runs share it.
+function syncLists() {
+  if (listSyncInFlight) return listSyncInFlight
+  const target = sock
+  if (!target || connection !== 'open' || !appStateKeys) return Promise.resolve(false)
+  listSyncInFlight = scanAppState(target, appStateKeys, logger)
+    .then((result) => {
+      if (sock !== target) return false
+      const pinned = store.applyAppState(result)
+      for (const jid of pinned) resolveGroupName(jid)
+      logger.info({
+        pins: result.pins ? [...result.pins.values()].filter((ts) => ts > 0).length : null,
+        favorites: result.favorites?.length ?? null,
+        lists: result.labels?.length ?? null
+      }, 'appstate: lists synced')
+      pushChats()
+      return true
+    })
+    .catch((err) => {
+      logger.warn({ err: err?.message }, 'appstate: list sync failed')
+      return false
+    })
+    .finally(() => { listSyncInFlight = null })
+  return listSyncInFlight
+}
+
+// The phone keys list entries by LID for contacts where it has one.
+function appStateJid(jid) {
+  const canonical = store.canonicalJid(jid) || normalizeJid(jid)
+  if (isGroupJid(canonical)) return canonical
+  for (const [from, to] of store.aliases) {
+    if (from.endsWith('@lid') && store.canonicalJid(to) === canonical) return from
+  }
+  return canonical
+}
+
+// Lists live in the "regular" app-state collection, which Baileys keeps in
+// sync, so its own addChatLabel / removeChatLabel can write them.
+async function setListMember(jid, listId, member) {
+  if (!sock || connection !== 'open') throw new Error('Not connected to WhatsApp')
+  const target = appStateJid(jid)
+  if (member) await sock.addChatLabel(target, listId)
+  else await sock.removeChatLabel(target, listId)
+  store.setListMembership(listId, target, member)
+  pushChats()
+  syncListsSoon()
+}
+
+function syncListsSoon(delay = LIST_SYNC_DEBOUNCE_MS) {
+  if (listSyncTimer) clearTimeout(listSyncTimer)
+  listSyncTimer = setTimeout(() => {
+    listSyncTimer = null
+    syncLists()
+  }, delay)
+  listSyncTimer.unref?.()
 }
 
 function pushChatsSoon() {
@@ -427,7 +497,7 @@ function applyChatMetadata(rawChats) {
       notifier.cancel(canonical)
       if (canonical !== jid) notifier.cancel(jid)
     }
-    if (raw.pinned !== undefined) chat.pinned = !!raw.pinned
+    if (raw.pinned !== undefined) chat.pinned = pinRank(raw.pinned)
   }
   store.applyNamesToChats()
   store.markDirty()
@@ -710,11 +780,12 @@ async function connect() {
       return
     }
 
+    appStateKeys = makeCacheableSignalKeyStore(authState.keys, waLogger)
     sock = makeWASocket({
       version,
       auth: {
         creds: authState.creds,
-        keys: makeCacheableSignalKeyStore(authState.keys, waLogger)
+        keys: appStateKeys
       },
       logger: waLogger,
       // The phone keeps pushing its own notifications while this device stays
@@ -773,6 +844,7 @@ async function connect() {
             })
           resolveContactLids().catch((err) => logger.debug({ err }, 'contact resolve failed'))
         }, 800).unref?.()
+        syncListsSoon(4000)
         return
       }
 
@@ -863,6 +935,12 @@ async function connect() {
       }
       pushChatsSoon()
       if (store.totalUnread() !== before) pushState()
+    })
+
+    // Another device changed app state (pin, favourite, list edit, ...).
+    // Baileys skips favourites and lists, so re-read them ourselves.
+    sock.ws.on('CB:notification,type:server_sync', () => {
+      if (sock === thisSocket) syncListsSoon()
     })
 
     sock.ev.on('chats.upsert', (chats) => {
@@ -958,7 +1036,7 @@ async function connect() {
           t: 'message',
           jid: canonicalTarget,
           message: publicMessage(message),
-          chat: store.chat(canonicalTarget),
+          chat: store.publicChat(canonicalTarget),
           unread: store.totalUnread()
         })
       }
@@ -1107,27 +1185,28 @@ async function handleCommand(payload, reply) {
       return
 
     case 'chats':
-      reply({ t: 'chats', chats: store.chatList(payload.limit || 60), unread: store.totalUnread() })
+      reply(chatsFrame(Math.max(payload.limit || 0, CHAT_POOL)))
       return
 
     case 'refresh': {
-      const limit = payload.limit || 60
+      const limit = Math.max(payload.limit || 0, CHAT_POOL)
       const messageLimit = payload.messageLimit || 60
       const jid = payload.jid ? String(payload.jid) : ''
       if (!refreshInFlight && sock && connection === 'open') {
         refreshInFlight = true
         try {
           await pullLatestFromWhatsApp()
+          await syncLists()
         } catch (err) {
           logger.debug({ err }, 'refresh: whatsapp sync failed')
         } finally {
           refreshInFlight = false
         }
       }
-      const chats = store.chatList(limit)
-      const unread = store.totalUnread()
+      const frame = chatsFrame(limit)
+      const { unread } = frame
       pushState()
-      bus.broadcast({ t: 'chats', chats, unread })
+      bus.broadcast(frame)
       if (jid) {
         const canonical = store.canonicalJid(jid) || jid
         const list = store.messageList(canonical, messageLimit)
@@ -1136,7 +1215,7 @@ async function handleCommand(payload, reply) {
         reply({
           t: 'messages',
           jid,
-          chat: store.chat(canonical),
+          chat: store.publicChat(canonical),
           messages: list.map(publicMessage),
           unread
         })
@@ -1144,8 +1223,27 @@ async function handleCommand(payload, reply) {
           if (message.media && !existingMediaPath(message)) media.enqueue(canonical, message)
         }
       } else {
-        reply({ t: 'chats', chats, unread })
+        reply(frame)
       }
+      return
+    }
+
+    case 'listMember': {
+      try {
+        await setListMember(String(payload.jid || ''), String(payload.listId || ''), payload.member === true)
+        reply(chatsFrame())
+      } catch (err) {
+        logger.warn({ err: err?.message }, 'list change failed')
+        reply({ t: 'error', for: 'listMember', message: err?.message || 'List change failed' })
+      }
+      return
+    }
+
+    case 'pinMove': {
+      const jid = payload.jid ? String(payload.jid) : ''
+      const delta = Number(payload.delta) || 0
+      if (jid && delta && store.movePin(jid, delta)) pushChats()
+      reply(chatsFrame())
       return
     }
 
@@ -1159,7 +1257,7 @@ async function handleCommand(payload, reply) {
         reply({
           t: 'messages',
           jid: payload.jid,
-          chat: store.chat(canonical),
+          chat: store.publicChat(canonical),
           messages: list.map(publicMessage)
         })
         for (const message of list) {
@@ -1200,7 +1298,7 @@ async function handleCommand(payload, reply) {
             store.upsertMessage(canonicalTarget, message)
           }
           store.rememberRetryMessage(canonicalTarget, message.id, sent.message)
-          bus.broadcast({ t: 'message', jid: rawJid, message: publicMessage(message), chat: store.chat(canonicalTarget), unread: store.totalUnread() })
+          bus.broadcast({ t: 'message', jid: rawJid, message: publicMessage(message), chat: store.publicChat(canonicalTarget), unread: store.totalUnread() })
           applyMessageStatus(canonicalTarget, message.id, MSG_SERVER_ACK)
           pushChats()
         }

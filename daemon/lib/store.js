@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { storeFile } from './paths.js'
 import { logger } from './logger.js'
-import { isGroupJid, prettyJid } from './message.js'
+import { isGroupJid, isIgnorableChat, prettyJid } from './message.js'
 import { mergeMutePreferences, shouldNotifyChat } from './preferences.js'
 
 const MAX_MESSAGES_PER_CHAT = 200
@@ -15,6 +15,13 @@ export function normalizeJid(jid) {
   const bare = user.split(':')[0]
   if (server === 'c.us') return `${bare}@s.whatsapp.net`
   return server ? `${bare}@${server}` : bare
+}
+
+// Pins used to be stored as booleans; now they carry the pin timestamp so
+// several pins keep WhatsApp's order.
+export function pinRank(value) {
+  if (typeof value === 'number') return value > 0 ? value : 0
+  return value ? 1 : 0
 }
 
 export function isPlaceholderName(name) {
@@ -40,6 +47,14 @@ export class Store {
     this.addressBookKeys = new Set()
     /** @type {Map<string, string>} */
     this.aliases = new Map()
+    /** Custom chat lists, in WhatsApp's order: [{ id, name }]. */
+    this.lists = []
+    /** @type {Map<string, Set<string>>} list id -> member JIDs (any alias form) */
+    this.listMembers = new Map()
+    /** @type {Set<string>} */
+    this.favorites = new Set()
+    /** Local-only order of pinned chats (canonical JIDs), set by pinMove. */
+    this.pinOrder = []
     this.me = null
     this._persistTimer = null
     this._dirty = false
@@ -86,6 +101,10 @@ export class Store {
       for (const [jid, name] of Object.entries(data.names || {})) this.names.set(jid, name)
       for (const key of data.addressBookKeys || []) this.addressBookKeys.add(key)
       for (const [from, to] of Object.entries(data.aliases || {})) this.aliases.set(from, to)
+      if (Array.isArray(data.lists)) this.lists = data.lists
+      for (const [id, jids] of Object.entries(data.listMembers || {})) this.listMembers.set(id, new Set(jids))
+      for (const jid of data.favorites || []) this.favorites.add(jid)
+      if (Array.isArray(data.pinOrder)) this.pinOrder = data.pinOrder
       this.me = data.me || null
       for (const list of this.messages.values()) {
         for (const message of list) {
@@ -137,7 +156,11 @@ export class Store {
       messages,
       names: Object.fromEntries(this.names),
       addressBookKeys: [...this.addressBookKeys],
-      aliases: Object.fromEntries(this.aliases)
+      aliases: Object.fromEntries(this.aliases),
+      lists: this.lists,
+      listMembers: Object.fromEntries([...this.listMembers].map(([id, set]) => [id, [...set]])),
+      favorites: [...this.favorites],
+      pinOrder: this.pinOrder
     }
     const tmp = `${storeFile}.tmp`
     try {
@@ -258,7 +281,7 @@ export class Store {
       chatP.unread = Math.max(chatP.unread || 0, chatS.unread || 0)
       mergeMutePreferences(chatP, chatS)
       chatP.archived = chatP.archived || chatS.archived
-      chatP.pinned = chatP.pinned || chatS.pinned
+      chatP.pinned = Math.max(pinRank(chatP.pinned), pinRank(chatS.pinned))
 
       if (isPlaceholderName(chatP.name) && !isPlaceholderName(chatS.name)) {
         chatP.name = chatS.name
@@ -408,7 +431,19 @@ export class Store {
     return total
   }
 
+  // Canonical JIDs of every favourite and list member.
+  _listedJids() {
+    const listed = new Set()
+    const add = (jid) => {
+      if (!isIgnorableChat(jid)) listed.add(this.canonicalJid(jid) || normalizeJid(jid))
+    }
+    for (const set of this.listMembers.values()) for (const jid of set) add(jid)
+    for (const jid of this.favorites) add(jid)
+    return listed
+  }
+
   sortedChats() {
+    const listed = this._listedJids()
     const seen = new Set()
     const list = []
     for (const chat of this.chats.values()) {
@@ -417,18 +452,113 @@ export class Store {
       if (seen.has(canonical)) continue
       seen.add(canonical)
       const canonicalChat = this.chat(canonical)
-      if (canonicalChat.lastTs > 0 || canonicalChat.unread > 0) {
+      // Pinned chats and list members stay listed even when quiet, as on the
+      // phone; the panel's "All" tab still hides the quiet ones.
+      if (canonicalChat.lastTs > 0 || canonicalChat.unread > 0 || pinRank(canonicalChat.pinned) > 0
+        || listed.has(canonical)) {
         list.push(canonicalChat)
       }
     }
+    // Pinned first. Chats the user reordered keep that order; any other pin
+    // (e.g. one pinned since) goes above them, most recently pinned on top,
+    // as on the phone.
+    const order = new Map(this.pinOrder.map((jid, i) => [jid, i]))
     return list.sort((a, b) => {
-      if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1
+      const pa = pinRank(a.pinned)
+      const pb = pinRank(b.pinned)
+      if ((pa > 0) !== (pb > 0)) return pb > 0 ? 1 : -1
+      if (pa > 0) {
+        const oa = order.has(a.jid) ? order.get(a.jid) : -1
+        const ob = order.has(b.jid) ? order.get(b.jid) : -1
+        if (oa !== ob) return oa - ob
+        if (pa !== pb) return pb - pa
+      }
       return (b.lastTs || 0) - (a.lastTs || 0)
     })
   }
 
+  /** Move a pinned chat up (delta < 0) or down within the pinned group. */
+  movePin(jid, delta) {
+    const key = this.canonicalJid(jid) || normalizeJid(jid)
+    const pinned = this.sortedChats().filter((c) => pinRank(c.pinned) > 0).map((c) => c.jid)
+    const from = pinned.indexOf(key)
+    if (from < 0) return false
+    const to = Math.max(0, Math.min(pinned.length - 1, from + delta))
+    if (to === from) return false
+    pinned.splice(to, 0, ...pinned.splice(from, 1))
+    this.pinOrder = pinned
+    this.markDirty()
+    return true
+  }
+
+  _membership() {
+    const members = new Map()
+    for (const [id, set] of this.listMembers) {
+      members.set(id, new Set([...set].map((jid) => this.canonicalJid(jid) || jid)))
+    }
+    const favorites = new Set([...this.favorites].map((jid) => this.canonicalJid(jid) || jid))
+    return { members, favorites }
+  }
+
+  _decorate(chat, { members, favorites }) {
+    const lists = []
+    for (const list of this.lists) if (members.get(list.id)?.has(chat.jid)) lists.push(list.id)
+    return { ...chat, pinned: pinRank(chat.pinned), favorite: favorites.has(chat.jid), lists }
+  }
+
+  /** A chat as the panel sees it: pin rank, favourite flag, and list ids. */
+  publicChat(jid) {
+    return this._decorate(this.chat(jid), this._membership())
+  }
+
   chatList(limit = 40) {
-    return this.sortedChats().slice(0, Math.max(1, limit))
+    const membership = this._membership()
+    return this.sortedChats().slice(0, Math.max(1, limit)).map((chat) => this._decorate(chat, membership))
+  }
+
+  /** Replace pins, favourites, and lists with a fresh app-state scan. */
+  // A null part means that collection could not be read; keep what we have.
+  // Returns the pinned and listed JIDs, so the caller can resolve names for
+  // chats that only exist here because of that.
+  applyAppState({ pins, favorites, labels, members }) {
+    const pinnedJids = []
+    if (pins) {
+      const pinned = new Map()
+      for (const [jid, ts] of pins) {
+        if (ts <= 0 || isIgnorableChat(jid) || String(jid).endsWith('@status')) continue
+        const key = this.canonicalJid(jid) || normalizeJid(jid)
+        pinned.set(key, Math.max(pinned.get(key) || 0, ts))
+      }
+      for (const chat of this.chats.values()) {
+        const next = pinned.get(this.canonicalJid(chat.jid) || chat.jid) || 0
+        if (pinRank(chat.pinned) !== next) chat.pinned = next
+      }
+      for (const [key, ts] of pinned) {
+        this.chat(key).pinned = ts
+        pinnedJids.push(key)
+      }
+      this.pinOrder = this.pinOrder.filter((jid) => pinned.has(jid))
+    }
+    if (labels) {
+      this.lists = labels
+      this.listMembers = new Map([...members].filter(([id]) => labels.some((l) => l.id === id)))
+    }
+    if (favorites) this.favorites = new Set(favorites)
+    const listed = this._listedJids()
+    for (const jid of listed) this.chat(jid)
+    this.markDirty()
+    return [...new Set([...pinnedJids, ...listed])]
+  }
+
+  setListMembership(id, jid, member) {
+    if (!this.listMembers.has(id)) this.listMembers.set(id, new Set())
+    const set = this.listMembers.get(id)
+    const canonical = this.canonicalJid(jid) || normalizeJid(jid)
+    for (const existing of [...set]) {
+      if ((this.canonicalJid(existing) || existing) === canonical) set.delete(existing)
+    }
+    if (member) set.add(jid)
+    this.markDirty()
   }
 
   messageList(jid, limit = 60) {

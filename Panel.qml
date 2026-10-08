@@ -31,6 +31,14 @@ Panel {
   property bool logoutConfirmOpen: false
   property bool refreshing: false
   property string peekImagePath: ""
+  // Which chat list tab is showing: "all", "unread", "favorites", "groups",
+  // or "list:<id>" for one of the user's own WhatsApp lists.
+  property string activeList: "all"
+  // List picker (l): which chat it edits and where its cursor is.
+  property bool listPickerOpen: false
+  property string listPickerJid: ""
+  property int listPickerIndex: 0
+  readonly property var customLists: root.client ? (root.client.lists || []) : []
   readonly property bool peekActive: peekImagePath.length > 0
 
   readonly property var chats: client ? client.chats : []
@@ -64,11 +72,64 @@ Panel {
     return list[index]
   }
 
+  // WhatsApp's own filter row: the built-in filters, then the user's lists.
+  readonly property var listTabs: {
+    var tabs = [
+      { id: "all", name: "All" },
+      { id: "unread", name: "Unread" },
+      { id: "favorites", name: "Favourites" },
+      { id: "groups", name: "Groups" }
+    ]
+    var custom = root.client ? (root.client.lists || []) : []
+    for (var i = 0; i < custom.length; i++)
+      tabs.push({ id: "list:" + custom[i].id, name: custom[i].name })
+    return tabs
+  }
+
+  readonly property int activeListIndex: {
+    for (var i = 0; i < root.listTabs.length; i++)
+      if (root.listTabs[i].id === root.activeList) return i
+    return 0
+  }
+
+  function chatInList(chat, listId) {
+    if (!chat) return false
+    if (listId === "unread") return (chat.unread || 0) > 0
+    if (listId === "favorites") return chat.favorite === true
+    if (listId === "groups") return chat.isGroup === true
+    if (listId.indexOf("list:") === 0)
+      return (chat.lists || []).indexOf(listId.slice(5)) !== -1
+    // "All": list members the daemon only knows from app state have no
+    // messages yet; keep them out unless pinned.
+    return (chat.lastTs || 0) > 0 || (chat.unread || 0) > 0 || (chat.pinned || 0) > 0
+  }
+
   readonly property var visibleChats: {
     var epoch = root.client ? root.client.chatsEpoch : 0
     var list = root.chats || []
     if (epoch < 0) return []
+    var listId = root.listTabs[root.activeListIndex].id
+    list = list.filter(function (chat) { return root.chatInList(chat, listId) })
     return list.slice(0, Math.max(1, root.chatLimit))
+  }
+
+  onVisibleChatsChanged: {
+    var count = root.visibleChats.length
+    if (root.cursorIndex > count - 1) root.cursorIndex = Math.max(0, count - 1)
+  }
+
+  function selectList(index) {
+    var count = root.listTabs.length
+    if (count === 0) return
+    var next = ((index % count) + count) % count
+    root.activeList = root.listTabs[next].id
+    root.cursorIndex = 0
+    chatList.positionViewAtBeginning()
+    listStrip.positionViewAtIndex(next, ListView.Contain)
+  }
+
+  function cycleList(direction) {
+    root.selectList(root.activeListIndex + direction)
   }
 
   // Point the panel at a chat without touching read state. Used by the focus
@@ -128,6 +189,53 @@ Panel {
     if (next > count - 1) next = count - 1
     root.cursorIndex = next
     chatList.positionViewAtIndex(next, ListView.Contain)
+  }
+
+  // Shift+Up/Down: move the pinned chat under the cursor within the pinned
+  // group. The order is kept by the daemon and only affects this panel.
+  function movePinnedChat(delta) {
+    if (root.view !== "chats" || !root.client) return
+    var chat = root.chatAt(root.cursorIndex)
+    var target = root.chatAt(root.cursorIndex + delta)
+    if (!chat || !target || (chat.pinned || 0) <= 0 || (target.pinned || 0) <= 0) return
+    if (!root.client.movePin(chat.jid, delta)) return
+    root.cursorIndex = root.cursorIndex + delta
+    chatList.positionViewAtIndex(root.cursorIndex, ListView.Contain)
+  }
+
+  function openListPicker() {
+    if (root.view !== "chats") return
+    var chat = root.chatAt(root.cursorIndex)
+    if (!chat) return
+    if (root.customLists.length === 0) {
+      root.statusLine = "No lists yet; create one on your phone"
+      return
+    }
+    root.listPickerJid = chat.jid
+    root.listPickerIndex = 0
+    root.listPickerOpen = true
+    Qt.callLater(function () { listPicker.forceActiveFocus() })
+  }
+
+  function closeListPicker() {
+    root.listPickerOpen = false
+    Qt.callLater(function () { keyCatcher.forceActiveFocus() })
+  }
+
+  function pickerChat() {
+    var list = root.chats || []
+    for (var i = 0; i < list.length; i++)
+      if (list[i].jid === root.listPickerJid) return list[i]
+    return null
+  }
+
+  function toggleListMembership(index) {
+    var list = root.customLists[index]
+    var chat = root.pickerChat()
+    if (!list || !chat || !root.client) return
+    var member = (chat.lists || []).indexOf(list.id) !== -1
+    root.statusLine = (member ? "Removing from " : "Adding to ") + list.name + "\u2026"
+    if (!root.client.setListMember(chat.jid, list.id, !member)) root.statusLine = "Daemon offline"
   }
 
   function activateCursor() {
@@ -246,6 +354,7 @@ Panel {
 
     function onChatsChanged() {
       if (root.refreshing && root.view !== "chat") root.finishRefresh()
+      if (/^(Adding to|Removing from)/.test(root.statusLine)) root.statusLine = ""
     }
 
     function onMessageArrived(jid, message, chat) {
@@ -269,7 +378,7 @@ Panel {
     }
 
     function onCommandFailed(command, message) {
-      if (command === "send") root.statusLine = message
+      if (command === "send" || command === "listMember") root.statusLine = message
       if (command === "refresh") {
         root.refreshing = false
         refreshWatchdog.stop()
@@ -338,7 +447,7 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       // Composer, logout confirm, and image peek own keys while they are up.
-      blocked: composer.activeFocus || root.logoutConfirmOpen || root.peekActive
+      blocked: composer.activeFocus || root.logoutConfirmOpen || root.peekActive || root.listPickerOpen
 
       onCloseRequested: {
         if (root.peekActive) root.peekImagePath = ""
@@ -346,11 +455,34 @@ Panel {
         else if (root.view === "chat") root.back()
         else root.close()
       }
-      onTabRequested: function (direction) { root.switchPanel(direction) }
+      // Tab walks the chat lists, like the filter chips in WhatsApp.
+      onTabRequested: function (direction) {
+        if (root.view === "chats" && !root.showLogin) root.cycleList(direction)
+        else root.switchPanel(direction)
+      }
       onMoveRequested: function (dx, dy) { root.moveCursor(dy) }
       onActivateRequested: root.activateCursor()
       onTextKey: function (text) {
         if (text === "r" || text === "R") root.refreshChats()
+      }
+
+      // PanelKeyCatcher reports Shift+Up/Down as plain Up/Down and takes "l"
+      // as "move right", so these are shortcuts, which run before item key
+      // handling.
+      Shortcut {
+        sequences: ["Shift+Up", "Shift+K"]
+        enabled: root.opened && root.view === "chats" && !keyCatcher.blocked
+        onActivated: root.movePinnedChat(-1)
+      }
+      Shortcut {
+        sequences: ["Shift+Down", "Shift+J"]
+        enabled: root.opened && root.view === "chats" && !keyCatcher.blocked
+        onActivated: root.movePinnedChat(1)
+      }
+      Shortcut {
+        sequence: "L"
+        enabled: root.opened && root.view === "chats" && !keyCatcher.blocked
+        onActivated: root.openListPicker()
       }
 
       Column {
@@ -532,10 +664,59 @@ Panel {
           spacing: Style.space(4)
           visible: !root.showLogin && root.view === "chats"
 
+          ListView {
+            id: listStrip
+            width: parent.width
+            height: Style.space(24)
+            orientation: ListView.Horizontal
+            spacing: Style.space(4)
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentWidth > width
+            model: root.listTabs
+            currentIndex: root.activeListIndex
+
+            delegate: Rectangle {
+              id: listChip
+              required property var modelData
+              required property int index
+              readonly property bool active: listChip.index === root.activeListIndex
+
+              width: chipLabel.implicitWidth + Style.space(16)
+              height: ListView.view.height
+              radius: height / 2
+              color: listChip.active
+                ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
+                : chipMouse.containsMouse
+                  ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
+                  : Style.normalFillFor(root.foreground, Color.accent)
+              border.color: listChip.active ? (root.bar ? root.bar.urgent : Color.accent) : "transparent"
+              border.width: 1
+
+              Text {
+                id: chipLabel
+                anchors.centerIn: parent
+                text: listChip.modelData.name
+                color: listChip.active ? root.foreground : root.secondaryForeground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: listChip.active
+              }
+
+              MouseArea {
+                id: chipMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.selectList(listChip.index)
+              }
+            }
+          }
+
           Text {
             width: parent.width
             visible: root.visibleChats.length === 0
-            text: "No conversations yet."
+            text: root.activeListIndex === 0 ? "No conversations yet." : "No chats in this list."
             color: root.secondaryForeground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -555,96 +736,143 @@ Panel {
             spacing: Style.space(1)
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            delegate: CursorSurface {
-              id: chatRow
+            delegate: Item {
+              id: chatSlot
               required property var modelData
               required property int index
 
-              width: ListView.view.width
-              implicitHeight: rowText.implicitHeight + Style.space(10)
-              height: implicitHeight
-              foreground: root.foreground
-              accent: root.bar ? root.bar.urgent : Color.accent
-              hasCursor: root.cursorIndex === chatRow.index
-
-              Column {
-                id: rowText
-                anchors.left: parent.left
-                anchors.right: rowMeta.left
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Style.space(8)
-                anchors.rightMargin: Style.space(6)
-                spacing: Style.space(1)
-
-                Text {
-                  width: parent.width
-                  text: Model.chatTitle(chatRow.modelData)
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  font.bold: (chatRow.modelData.unread || 0) > 0
-                  elide: Text.ElideRight
-                }
-
-                Text {
-                  width: parent.width
-                  text: Model.truncate(Model.chatPreview(chatRow.modelData), 64)
-                  color: root.secondaryForeground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
-                }
+              // The last pinned chat carries a divider below it, outside the
+              // row so the cursor highlight never covers it.
+              readonly property bool lastPinned: {
+                if ((chatSlot.modelData.pinned || 0) <= 0) return false
+                var next = root.visibleChats[chatSlot.index + 1]
+                return next !== undefined && (next.pinned || 0) <= 0
               }
 
-              Column {
-                id: rowMeta
+              width: ListView.view.width
+              height: chatRow.height + (chatSlot.lastPinned ? pinDivider.height + Style.space(6) : 0)
+
+              PanelSeparator {
+                id: pinDivider
+                visible: chatSlot.lastPinned
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: Style.space(2)
+                anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(8)
                 anchors.rightMargin: Style.space(8)
-                spacing: Style.space(2)
-                width: Math.max(badge.implicitWidth, stamp.implicitWidth)
+                width: undefined
+                foreground: root.foreground
+                strength: 0.25
+              }
 
-                Text {
-                  id: stamp
-                  anchors.right: parent.right
-                  text: Model.chatTimestamp(chatRow.modelData.lastTs)
-                  color: root.secondaryForeground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
+              CursorSurface {
+                id: chatRow
+                readonly property var modelData: chatSlot.modelData
+                readonly property int index: chatSlot.index
 
-                Rectangle {
-                  id: badge
-                  anchors.right: parent.right
-                  visible: (chatRow.modelData.unread || 0) > 0
-                  implicitWidth: badgeLabel.implicitWidth + Style.space(8)
-                  implicitHeight: badgeLabel.implicitHeight + Style.space(2)
-                  width: implicitWidth
-                  height: implicitHeight
-                  radius: height / 2
-                  color: root.bar ? root.bar.urgent : Color.urgent
+                width: parent.width
+                implicitHeight: rowText.implicitHeight + Style.space(10)
+                height: implicitHeight
+                foreground: root.foreground
+                accent: root.bar ? root.bar.urgent : Color.accent
+                hasCursor: root.cursorIndex === chatRow.index
+
+                Column {
+                  id: rowText
+                  anchors.left: parent.left
+                  anchors.right: rowMeta.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(8)
+                  anchors.rightMargin: Style.space(6)
+                  spacing: Style.space(1)
 
                   Text {
-                    id: badgeLabel
-                    anchors.centerIn: parent
-                    text: Model.badgeText(chatRow.modelData.unread)
-                    color: Color.background
+                    width: parent.width
+                    text: Model.chatTitle(chatRow.modelData)
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: (chatRow.modelData.unread || 0) > 0
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: Model.truncate(Model.chatPreview(chatRow.modelData), 64)
+                    color: root.secondaryForeground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
-                    font.bold: true
+                    elide: Text.ElideRight
                   }
                 }
-              }
 
-              MouseArea {
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onContainsMouseChanged: if (containsMouse) root.cursorIndex = chatRow.index
-                onClicked: root.selectChat(chatRow.modelData.jid)
+                Column {
+                  id: rowMeta
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.rightMargin: Style.space(8)
+                  spacing: Style.space(2)
+                  width: Math.max(badge.implicitWidth, stamp.implicitWidth)
+
+                  Text {
+                    id: stamp
+                    anchors.right: parent.right
+                    text: {
+                      var stampText = Model.chatTimestamp(chatRow.modelData.lastTs)
+                      if ((chatRow.modelData.pinned || 0) <= 0) return stampText
+                      return stampText.length > 0 ? stampText + " \uf08d" : "\uf08d"
+                    }
+                    color: root.secondaryForeground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Rectangle {
+                    id: badge
+                    anchors.right: parent.right
+                    visible: (chatRow.modelData.unread || 0) > 0
+                    implicitWidth: badgeLabel.implicitWidth + Style.space(8)
+                    implicitHeight: badgeLabel.implicitHeight + Style.space(2)
+                    width: implicitWidth
+                    height: implicitHeight
+                    radius: height / 2
+                    color: root.bar ? root.bar.urgent : Color.urgent
+
+                    Text {
+                      id: badgeLabel
+                      anchors.centerIn: parent
+                      text: Model.badgeText(chatRow.modelData.unread)
+                      color: Color.background
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
+                  }
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onContainsMouseChanged: if (containsMouse) root.cursorIndex = chatRow.index
+                  onClicked: root.selectChat(chatRow.modelData.jid)
+                }
               }
             }
           }
+        }
+
+        // ── Key hints ────────────────────────────────────────────────────
+        Text {
+          width: parent.width
+          visible: !root.showLogin && root.view === "chats"
+          horizontalAlignment: Text.AlignHCenter
+          text: "tab lists \u00b7 \u21e7\u2191\u2193 reorder pins \u00b7 l edit lists \u00b7 r refresh"
+          color: root.secondaryForeground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
         }
 
         // ── Conversation ─────────────────────────────────────────────────
@@ -878,6 +1106,101 @@ Panel {
               fontFamily: root.fontFamily
               onClicked: root.sendReply()
             }
+          }
+        }
+      }
+
+      // ── List picker (l) ────────────────────────────────────────────────
+      Rectangle {
+        id: listPicker
+        visible: root.listPickerOpen
+        anchors.fill: parent
+        z: 10
+        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.94)
+        focus: root.listPickerOpen
+
+        Keys.onPressed: function (event) {
+          var count = root.customLists.length
+          if (event.key === Qt.Key_Escape || event.text === "l" || event.text === "q") {
+            root.closeListPicker()
+          } else if (event.key === Qt.Key_Down || event.text === "j") {
+            root.listPickerIndex = Math.min(count - 1, root.listPickerIndex + 1)
+          } else if (event.key === Qt.Key_Up || event.text === "k") {
+            root.listPickerIndex = Math.max(0, root.listPickerIndex - 1)
+          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+            root.toggleListMembership(root.listPickerIndex)
+          } else {
+            return
+          }
+          event.accepted = true
+        }
+
+        MouseArea { anchors.fill: parent; onClicked: root.closeListPicker() }
+
+        Column {
+          anchors.centerIn: parent
+          width: Math.min(parent.width - Style.space(40), Style.space(260))
+          spacing: Style.space(4)
+
+          Text {
+            width: parent.width
+            text: {
+              var chat = root.pickerChat()
+              return "Lists for " + (chat ? Model.chatTitle(chat) : "")
+            }
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            elide: Text.ElideRight
+          }
+
+          Repeater {
+            model: root.customLists
+
+            CursorSurface {
+              id: pickerRow
+              required property var modelData
+              required property int index
+              readonly property bool member: {
+                var chat = root.pickerChat()
+                return chat !== null && (chat.lists || []).indexOf(pickerRow.modelData.id) !== -1
+              }
+
+              width: parent.width
+              height: pickerLabel.implicitHeight + Style.space(10)
+              foreground: root.foreground
+              accent: root.bar ? root.bar.urgent : Color.accent
+              hasCursor: root.listPickerIndex === pickerRow.index
+
+              Text {
+                id: pickerLabel
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                text: (pickerRow.member ? "\uf14a  " : "\uf096  ") + pickerRow.modelData.name
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onContainsMouseChanged: if (containsMouse) root.listPickerIndex = pickerRow.index
+                onClicked: root.toggleListMembership(pickerRow.index)
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: "\u21b5 toggle  \u00b7  esc done"
+            color: root.secondaryForeground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
           }
         }
       }

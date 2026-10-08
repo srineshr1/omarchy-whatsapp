@@ -38,6 +38,8 @@ Item {
   property string lastError: ""
   property var chats: []
   property int chatsEpoch: 0
+  // Custom WhatsApp chat lists, in the phone's order: [{ id, name }].
+  property var lists: []
   property string lastSocketError: ""
   property bool pendingLogin: false
 
@@ -95,6 +97,10 @@ Item {
   function logout() { request({ t: "logout" }) }
   function requestPairCode(phone) { request({ t: "pair", phone: phone }) }
   function setTyping(jid, state) { request({ t: "typing", jid: jid, state: state }) }
+  function movePin(jid, delta) { return request({ t: "pinMove", jid: jid, delta: delta }) }
+  function setListMember(jid, listId, member) {
+    return request({ t: "listMember", jid: jid, listId: listId, member: member })
+  }
 
   function setChats(list) {
     root.chats = list || []
@@ -114,9 +120,9 @@ Item {
     if (i >= 0) list[i] = chat
     else list.push(chat)
     list.sort(function (a, b) {
-      var aPin = a && a.pinned
-      var bPin = b && b.pinned
-      if (!!bPin !== !!aPin) return bPin ? 1 : -1
+      var aPin = (a && a.pinned) ? Number(a.pinned) || 1 : 0
+      var bPin = (b && b.pinned) ? Number(b.pinned) || 1 : 0
+      if (aPin !== bPin) return bPin - aPin
       return (b.lastTs || 0) - (a.lastTs || 0)
     })
     root.setChats(list)
@@ -207,11 +213,13 @@ Item {
         root.unread = frame.unread || 0
         root.me = frame.me || null
         root.lastError = frame.lastError || ""
+        if (frame.lists !== undefined) root.lists = frame.lists || []
         if (frame.chats !== undefined) root.setChats(frame.chats || [])
         if (root.linked) root.pendingLogin = false
         break
 
       case "chats":
+        if (frame.lists !== undefined) root.lists = frame.lists || []
         root.setChats(frame.chats || [])
         if (frame.unread !== undefined) root.unread = frame.unread || 0
         break
