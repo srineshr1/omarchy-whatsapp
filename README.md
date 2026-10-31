@@ -85,6 +85,8 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 | Refresh chats | Refresh button, or `r` |
 | Open a chat | `Enter` |
 | Reply | Type, then `Enter` |
+| Attach a file | Click the paperclip and choose any file; MP4 videos (up to 100 MB) are sent as video, everything else as a document |
+| Send a voice note | Click the microphone to record, then click Stop to send |
 | Back to the chat list | `Escape` |
 | Close the panel | `Escape` from the list |
 | Full WhatsApp Web | Right-click the icon, or the ⧉ button in the panel |

@@ -1,4 +1,4 @@
-import { chmodSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
+import { chmodSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import makeWASocket, {
@@ -19,7 +19,7 @@ import { Store, normalizeJid, pinRank } from './lib/store.js'
 import { scanAppState } from './lib/appstate.js'
 import { Notifier } from './lib/notify.js'
 import { Bus } from './lib/server.js'
-import { extractImage, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid, reactionDetails } from './lib/message.js'
+import { extractMedia, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid, reactionDetails } from './lib/message.js'
 import { existingMediaPath, MediaCache } from './lib/media.js'
 import {
   applyChatNotificationPreferences,
@@ -59,6 +59,11 @@ const MSG_SERVER_ACK = 2
 const MSG_DELIVERED = 3
 const MSG_READ = 4
 const MSG_PLAYED = 5
+const MAX_AUDIO_BYTES = 16 * 1024 * 1024
+const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024 * 1024
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024
+// Only MP4 plays reliably in every WhatsApp client; other containers go as documents.
+const VIDEO_EXTENSIONS = new Set(['mp4', 'm4v'])
 
 const store = new Store()
 const notifier = new Notifier()
@@ -299,7 +304,9 @@ function storedToWaContent(message) {
   if (message.media) {
     const node = { mimetype: message.media.mimetype }
     if (message.text && !isPhotoPlaceholder(message.text)) node.caption = message.text
-    return message.media.kind === 'sticker' ? { stickerMessage: node } : { imageMessage: node }
+    if (message.media.kind === 'sticker') return { stickerMessage: node }
+    if (message.media.kind === 'audio') return { audioMessage: node }
+    return { imageMessage: node }
   }
   if (!message.text) return undefined
   return { conversation: message.text }
@@ -369,13 +376,13 @@ function applyMessageStatus(jid, id, status) {
 
 function flatten(chatJid, message) {
   const ts = toTs(message.messageTimestamp)
-  const image = extractImage(message.message)
+  const attachment = extractMedia(message.message)
   const id = message.key?.id || `${ts}-${Math.random().toString(36).slice(2, 8)}`
   const flat = {
     id,
     ts,
     fromMe: !!message.key?.fromMe,
-    text: image ? (image.caption || messageText(message.message)) : messageText(message.message),
+    text: attachment ? (attachment.caption || messageText(message.message)) : messageText(message.message),
     type: messageType(message.message),
     senderName: senderNameFor(chatJid, message),
     senderJid: message.key?.participant ? jidNormalizedUser(message.key.participant) : '',
@@ -387,10 +394,12 @@ function flatten(chatJid, message) {
       participant: message.key?.participant || undefined
     }
   }
-  if (image) {
-    const { caption, ...payload } = image
+  if (attachment) {
+    const { caption, ...payload } = attachment
     flat.media = payload
-    flat.imagePath = existingMediaPath({ id, media: payload, imagePath: '' })
+    const cachedPath = existingMediaPath({ id, media: payload, imagePath: '' })
+    if (payload.kind === 'audio') flat.audioPath = cachedPath
+    else flat.imagePath = cachedPath
   }
   return flat
 }
@@ -1190,11 +1199,11 @@ async function markRead(jid) {
   }
 }
 
-async function refreshMissingImages(jid, list) {
+async function refreshMissingMedia(jid, list) {
   if (!sock || connection !== 'open') return
   if (typeof sock.requestPlaceholderResend !== 'function') return
   const missing = list.filter((message) => (
-    (message.type === 'imageMessage' || message.type === 'stickerMessage')
+    (message.type === 'imageMessage' || message.type === 'stickerMessage' || message.type === 'audioMessage')
     && !message.media
     && message.key?.id
   ))
@@ -1297,7 +1306,7 @@ async function handleCommand(payload, reply) {
         for (const message of list) {
           if (message.media && !existingMediaPath(message)) media.enqueue(canonical, message)
         }
-        refreshMissingImages(canonical, list).catch((err) => {
+        refreshMissingMedia(canonical, list).catch((err) => {
           logger.debug({ err, jid: canonical }, 'media: history refresh failed')
         })
       }
@@ -1338,6 +1347,96 @@ async function handleCommand(payload, reply) {
         }
       }
       reply({ t: 'ack', id, ok: true, jid: rawJid })
+      return
+    }
+
+    case 'sendVoiceNote': {
+      const rawJid = payload.jid
+      const path = String(payload.path || '')
+      if (!rawJid) throw new Error('sendVoiceNote: jid required')
+      if (!path.startsWith('/')) throw new Error('sendVoiceNote: an absolute file path is required')
+      if (!sock || connection !== 'open') throw new Error('sendVoiceNote: not connected to WhatsApp')
+      let size = 0
+      try { size = statSync(path).size } catch { throw new Error('sendVoiceNote: recording is unavailable') }
+      if (!size) throw new Error('sendVoiceNote: recording is empty')
+      if (size > MAX_AUDIO_BYTES) throw new Error('sendVoiceNote: recordings must be 16 MB or smaller')
+      const canonical = store.canonicalJid(rawJid) || rawJid
+      const routingJid = store.routingJid(rawJid) || rawJid
+      const sent = await sock.sendMessage(routingJid, {
+        audio: { url: path },
+        mimetype: 'audio/ogg; codecs=opus',
+        ptt: true
+      })
+      if (sent) {
+        if (asStatus(sent.status) < MSG_SERVER_ACK) sent.status = MSG_SERVER_ACK
+        const res = ingest(rawJid, sent)
+        if (res) {
+          const { message, canonicalTarget } = res
+          if ((message.status || 0) < MSG_SERVER_ACK) {
+            message.status = MSG_SERVER_ACK
+            store.markDirty()
+          }
+          store.rememberRetryMessage(canonicalTarget, message.id, sent.message)
+          bus.broadcast({ t: 'message', jid: canonicalTarget, message: publicMessage(message), chat: store.publicChat(canonicalTarget) })
+        }
+      }
+      reply({ t: 'sent', jid: canonical })
+      return
+    }
+
+    case 'sendFile': {
+      const rawJid = payload.jid
+      const path = String(payload.path || '')
+      if (!rawJid) throw new Error('sendFile: jid required')
+      if (!path.startsWith('/')) throw new Error('sendFile: an absolute file path is required')
+      if (!sock || connection !== 'open') throw new Error('sendFile: not connected to WhatsApp')
+      let file
+      try { file = statSync(path) } catch { throw new Error('sendFile: file is unavailable') }
+      if (!file.isFile()) throw new Error('sendFile: selected path is not a file')
+      if (!file.size) throw new Error('sendFile: file is empty')
+      if (file.size > MAX_DOCUMENT_BYTES) throw new Error('sendFile: files must be 2 GB or smaller')
+
+      const extension = path.split('.').pop().toLowerCase()
+      const mimetypes = {
+        '7z': 'application/x-7z-compressed', aac: 'audio/aac', bz2: 'application/x-bzip2',
+        c: 'text/x-c', conf: 'text/plain', cpp: 'text/x-c++', csv: 'text/csv', doc: 'application/msword',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        flac: 'audio/flac', gif: 'image/gif', gz: 'application/gzip', h: 'text/x-c', html: 'text/html',
+        jpeg: 'image/jpeg', jpg: 'image/jpeg', json: 'application/json', log: 'text/plain', m4a: 'audio/mp4',
+        md: 'text/markdown', mp3: 'audio/mpeg', mp4: 'video/mp4', odg: 'application/vnd.oasis.opendocument.graphics',
+        odp: 'application/vnd.oasis.opendocument.presentation', ods: 'application/vnd.oasis.opendocument.spreadsheet',
+        odt: 'application/vnd.oasis.opendocument.text', oga: 'audio/ogg', ogg: 'audio/ogg', opus: 'audio/ogg; codecs=opus',
+        pdf: 'application/pdf', png: 'image/png', ppt: 'application/vnd.ms-powerpoint',
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', rtf: 'application/rtf',
+        svg: 'image/svg+xml', tar: 'application/x-tar', tif: 'image/tiff', tiff: 'image/tiff', txt: 'text/plain',
+        wav: 'audio/wav', webp: 'image/webp', xls: 'application/vnd.ms-excel',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xml: 'application/xml',
+        zip: 'application/zip'
+      }
+      const canonical = store.canonicalJid(rawJid) || rawJid
+      const routingJid = store.routingJid(rawJid) || rawJid
+      const asVideo = VIDEO_EXTENSIONS.has(extension) && file.size <= MAX_VIDEO_BYTES
+      const sent = await sock.sendMessage(routingJid, asVideo
+        ? { video: { url: path }, mimetype: 'video/mp4' }
+        : {
+            document: { url: path },
+            fileName: path.split('/').pop(),
+            mimetype: Object.hasOwn(mimetypes, extension) ? mimetypes[extension] : 'application/octet-stream'
+          })
+      if (sent) {
+        if (asStatus(sent.status) < MSG_SERVER_ACK) sent.status = MSG_SERVER_ACK
+        const res = ingest(rawJid, sent)
+        if (res) {
+          const { message, canonicalTarget } = res
+          if ((message.status || 0) < MSG_SERVER_ACK) {
+            message.status = MSG_SERVER_ACK
+            store.markDirty()
+          }
+          store.rememberRetryMessage(canonicalTarget, message.id, sent.message)
+          bus.broadcast({ t: 'message', jid: canonicalTarget, message: publicMessage(message), chat: store.publicChat(canonicalTarget) })
+        }
+      }
+      reply({ t: 'sent', jid: canonical })
       return
     }
 
@@ -1526,7 +1625,11 @@ async function main() {
   media.getSocket = () => sock
   media.onReady = (jid, message) => {
     store.markDirty()
-    bus.broadcast({ t: 'messageMedia', jid, id: message.id, imagePath: message.imagePath || '' })
+    const kind = message.media?.kind || 'image'
+    const path = message.imagePath || message.audioPath || ''
+    if (kind === 'audio') message.audioPath = path
+    else message.imagePath = path
+    bus.broadcast({ t: 'messageMedia', jid, id: message.id, path, kind })
   }
 
   bus.snapshot = snapshot

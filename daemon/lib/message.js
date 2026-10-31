@@ -70,26 +70,27 @@ function bytesToB64(value) {
   return ''
 }
 
-// Image/sticker payloads we can decrypt later. Video and documents stay labels.
-export function extractImage(message) {
+// Media payloads that can be decrypted later. Video and documents stay labels.
+export function extractMedia(message) {
   const content = normalizeMessageContent(message)
   if (!content) return null
   const type = getContentType(content)
-  if (type !== 'imageMessage' && type !== 'stickerMessage') return null
+  if (type !== 'imageMessage' && type !== 'stickerMessage' && type !== 'audioMessage') return null
   const node = content[type]
   if (!node || typeof node !== 'object') return null
   const mediaKey = bytesToB64(node.mediaKey)
   if (!mediaKey || !(node.directPath || node.url)) return null
   const fileLength = Number(node.fileLength || 0)
   return {
-    kind: type === 'stickerMessage' ? 'sticker' : 'image',
-    mimetype: node.mimetype || (type === 'stickerMessage' ? 'image/webp' : 'image/jpeg'),
+    kind: type === 'stickerMessage' ? 'sticker' : type === 'audioMessage' ? 'audio' : 'image',
+    mimetype: node.mimetype || (type === 'stickerMessage' ? 'image/webp' : type === 'audioMessage' ? 'audio/ogg' : 'image/jpeg'),
     mediaKey,
     directPath: node.directPath || '',
     url: node.url || '',
     fileEncSha256: bytesToB64(node.fileEncSha256),
     fileSha256: bytesToB64(node.fileSha256),
     fileLength,
+    seconds: Number(node.seconds || 0),
     caption: typeof node.caption === 'string' ? node.caption : ''
   }
 }

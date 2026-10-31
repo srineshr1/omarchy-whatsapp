@@ -1,4 +1,4 @@
-import { createWriteStream, existsSync, renameSync, unlinkSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { downloadContentFromMessage } from 'baileys'
@@ -13,7 +13,15 @@ const EXT = {
   'image/jpg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
-  'image/gif': 'gif'
+  'image/gif': 'gif',
+  'audio/aac': 'aac',
+  'audio/flac': 'flac',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/ogg': 'ogg',
+  'audio/opus': 'opus',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav'
 }
 
 function safeId(id) {
@@ -55,9 +63,12 @@ function toWaMessage(message) {
     fileSha256: toBuffer(media.fileSha256) || undefined,
     fileLength: media.fileLength || undefined
   }
+  const type = media.kind === 'sticker' ? 'stickerMessage'
+    : media.kind === 'audio' ? 'audioMessage'
+      : 'imageMessage'
   return {
     key: message.key,
-    message: media.kind === 'sticker' ? { stickerMessage: body } : { imageMessage: body }
+    message: { [type]: body }
   }
 }
 
@@ -101,7 +112,9 @@ export class MediaCache {
 
   async pull(message) {
     const media = message.media
-    const kind = media.kind === 'sticker' ? 'sticker' : 'image'
+    const kind = media.kind === 'sticker' ? 'sticker'
+      : media.kind === 'audio' ? 'audio'
+        : 'image'
     const opts = { options: { timeout: 20000 } }
     const first = {
       mediaKey: toBuffer(media.mediaKey),
@@ -114,7 +127,9 @@ export class MediaCache {
       if (!sock?.updateMediaMessage) throw err
       logger.info({ id: message.id }, 'media: refreshing expired link')
       const refreshed = await sock.updateMediaMessage(toWaMessage(message))
-      const node = refreshed?.message?.imageMessage || refreshed?.message?.stickerMessage
+      const node = refreshed?.message?.imageMessage
+        || refreshed?.message?.stickerMessage
+        || refreshed?.message?.audioMessage
       if (node?.directPath) {
         media.directPath = node.directPath
         media.url = node.url || ''
@@ -131,15 +146,29 @@ export class MediaCache {
     const media = message.media
     const target = mediaPathFor(message.id, media.mimetype)
     const tmp = `${target}.part`
-    try {
-      const stream = await this.pull(message)
-      await pipeline(stream, createWriteStream(tmp, { mode: 0o600 }))
-      renameSync(tmp, target)
-      message.imagePath = target
-      this.onReady?.(jid, message)
-    } catch (err) {
+    let failure = null
+    // Logout can remove the cache while an old media request is in flight.
+    // Retry one ENOENT after recreating the directory; a second failure is a
+    // genuine unavailable/expired attachment and is reported normally.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try { unlinkSync(tmp) } catch { /* leftover */ }
-      logger.warn({ err: String(err?.message || err), id: message.id }, 'media: download failed')
+      try {
+        mkdirSync(mediaDir, { recursive: true, mode: 0o700 })
+        const stream = await this.pull(message)
+        mkdirSync(mediaDir, { recursive: true, mode: 0o700 })
+        await pipeline(stream, createWriteStream(tmp, { mode: 0o600 }))
+        mkdirSync(mediaDir, { recursive: true, mode: 0o700 })
+        renameSync(tmp, target)
+        if (media.kind === 'audio') message.audioPath = target
+        else message.imagePath = target
+        this.onReady?.(jid, message)
+        return
+      } catch (err) {
+        failure = err
+        if (err?.code !== 'ENOENT') break
+      }
     }
+    try { unlinkSync(tmp) } catch { /* leftover */ }
+    logger.warn({ err: String(failure?.message || failure), id: message.id }, 'media: download failed')
   }
 }

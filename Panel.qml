@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtMultimedia
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Io
@@ -56,6 +57,7 @@ Panel {
   readonly property color secondaryForeground: Qt.darker(root.foreground, 1.5)
   readonly property int chatLimit: root.setting("chatLimit", 40)
   readonly property int messageLimit: root.setting("messageLimit", 60)
+  property bool sendRecordedAudio: false
   property string reactionTargetId: ""
   property real reactionMenuX: 0
   property real reactionMenuY: 0
@@ -66,6 +68,31 @@ Panel {
     onTriggered: root.reactionTargetId = ""
   }
 
+  MediaPlayer {
+    id: voicePlayer
+    audioOutput: AudioOutput { volume: 1.0 }
+  }
+
+  CaptureSession {
+    audioInput: AudioInput { }
+    recorder: voiceRecorder
+  }
+
+  MediaRecorder {
+    id: voiceRecorder
+    mediaFormat.fileFormat: MediaFormat.Ogg
+    mediaFormat.audioCodec: MediaFormat.AudioCodec.Opus
+    audioBitRate: 64000
+    onRecorderStateChanged: {
+      if (recorderState !== MediaRecorder.StoppedState || !root.sendRecordedAudio) return
+      root.sendRecordedAudio = false
+      if (actualLocation && String(actualLocation).length > 0) root.sendVoiceNote(actualLocation)
+    }
+    onErrorOccurred: function (error, errorString) {
+      root.sendRecordedAudio = false
+      root.statusLine = errorString || "Microphone recording failed"
+    }
+  }
 
   function open() { root.controller.show() }
   function close() { root.controller.hide() }
@@ -269,6 +296,45 @@ Panel {
     }
   }
 
+  function localPath(url) {
+    var text = String(url || "")
+    if (text.indexOf("file://") !== 0) return ""
+    return decodeURIComponent(text.substring(7))
+  }
+
+  function sendVoiceNote(url) {
+    var path = root.localPath(url)
+    if (!path || !root.client || !root.client.ready || !root.activeJid) {
+      root.statusLine = "Cannot send voice note while disconnected"
+      return
+    }
+    root.statusLine = "Sending voice note…"
+    if (!root.client.sendVoiceNote(root.activeJid, path)) root.statusLine = "Could not send voice note"
+  }
+
+  function sendFile(path) {
+    var local = root.localPath(path) || String(path || "")
+    if (!local.startsWith("/") || !root.client || !root.client.ready || !root.activeJid) {
+      root.statusLine = "Cannot attach file while disconnected"
+      return
+    }
+    root.statusLine = "Sending file…"
+    if (!root.client.sendFile(root.activeJid, local)) root.statusLine = "Could not attach file"
+  }
+
+  function toggleRecording() {
+    if (voiceRecorder.recorderState === MediaRecorder.RecordingState) {
+      root.statusLine = "Sending voice note…"
+      root.sendRecordedAudio = true
+      voiceRecorder.stop()
+      return
+    }
+    var runtime = Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
+    voiceRecorder.outputLocation = Qt.resolvedUrl("file://" + runtime + "/omarchy-whatsapp-" + Date.now() + ".ogg")
+    root.statusLine = "Recording… click the stop button to send"
+    voiceRecorder.record()
+  }
+
   function sendReaction(messageId, emoji) {
     if (!root.client || !root.client.ready || !root.activeJid) return
     if (!root.client.react(root.activeJid, messageId, emoji)) root.statusLine = "Could not send reaction"
@@ -387,19 +453,25 @@ Panel {
       root.patchMessage(message.id, { reactions: message.reactions || [] })
     }
 
+    function onMediaSendCompleted(jid) {
+      if (jid === root.activeJid && (root.statusLine === "Sending file…" || root.statusLine === "Sending voice note…"))
+        root.statusLine = ""
+    }
+
     function onMessageStatusChanged(jid, messageId, status) {
       // Receipt JIDs are often a LID or device-suffixed form that does not
       // equal activeJid. Apply by message id in the open thread.
       root.patchMessage(messageId, { status: status })
     }
 
-    function onMessageMedia(jid, messageId, imagePath) {
-      if (jid !== root.activeJid || !imagePath) return
-      root.patchMessage(messageId, { imagePath: imagePath })
+    function onMessageMedia(jid, messageId, mediaPath, mediaKind) {
+      if (jid !== root.activeJid || !mediaPath) return
+      root.patchMessage(messageId, mediaKind === "audio" ? { audioPath: mediaPath } : { imagePath: mediaPath })
     }
 
     function onCommandFailed(command, message) {
       if (command === "send" || command === "listMember") root.statusLine = message
+      if (command === "sendFile" || command === "sendVoiceNote") root.statusLine = message
       if (command === "refresh") {
         root.refreshing = false
         refreshWatchdog.stop()
@@ -951,8 +1023,10 @@ Panel {
                 // width depend on content that depends on the bubble: a binding
                 // loop, which collapses every bubble to a few pixels.
                 readonly property real maxInner: Math.max(Style.space(60), bubbleRow.width * 0.82 - bubbleRow.pad * 2)
-                readonly property bool hasImage: messageRow.modelData.imagePath
+                readonly property bool hasImage: !!messageRow.modelData.imagePath
                   && String(messageRow.modelData.imagePath).length > 0
+                readonly property bool hasAudio: !!messageRow.modelData.audioPath
+                  && String(messageRow.modelData.audioPath).length > 0
                 readonly property bool showBody: {
                   var text = messageRow.modelData.text || ""
                   if (!text.length) return false
@@ -982,6 +1056,7 @@ Panel {
                     width: Math.max(
                       bubbleRow.showSender ? senderLabel.width : 0,
                       bubbleRow.hasImage ? photo.width : 0,
+                      bubbleRow.hasAudio ? audioControl.width : 0,
                       reactionsRow.visible ? reactionsRow.implicitWidth : 0,
                       bodyLabel.visible ? bodyLabel.width : 0,
                       Math.min(metaLabel.implicitWidth, bubbleRow.maxInner))
@@ -1033,6 +1108,37 @@ Panel {
                             color: "#ffffff"
                           }
                         }
+                      }
+                    }
+
+                    Row {
+                      id: audioControl
+                      visible: bubbleRow.hasAudio
+                      spacing: Style.space(5)
+
+                      PanelActionButton {
+                        iconText: voicePlayer.playbackState === MediaPlayer.PlayingState
+                          && voicePlayer.source.toString() === Qt.resolvedUrl("file://" + messageRow.modelData.audioPath).toString()
+                          ? "\uf04c" : "\uf04b"
+                        tooltipText: "Play audio"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: {
+                          var source = Qt.resolvedUrl("file://" + messageRow.modelData.audioPath)
+                          if (voicePlayer.playbackState === MediaPlayer.PlayingState && voicePlayer.source.toString() === source.toString()) voicePlayer.stop()
+                          else {
+                            voicePlayer.source = source
+                            voicePlayer.play()
+                          }
+                        }
+                      }
+
+                      Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Audio"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
                       }
                     }
 
@@ -1206,12 +1312,25 @@ Panel {
           // ── Inline reply ───────────────────────────────────────────────
           Item {
             width: parent.width
-            implicitHeight: Math.max(composer.implicitHeight, sendButton.implicitHeight)
+            implicitHeight: Math.max(composer.implicitHeight, attachButton.implicitHeight, microphoneButton.implicitHeight)
+
+            PanelActionButton {
+              id: attachButton
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\uf0c6"
+              tooltipText: "Attach file"
+              enabled: root.linked
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: if (!filePicker.running) filePicker.running = true
+            }
 
             TextField {
               id: composer
-              anchors.left: parent.left
-              anchors.right: sendButton.left
+              anchors.left: attachButton.right
+              anchors.leftMargin: Style.space(6)
+              anchors.right: microphoneButton.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
               foreground: root.foreground
@@ -1232,17 +1351,28 @@ Panel {
             }
 
             PanelActionButton {
-              id: sendButton
+              id: microphoneButton
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              iconText: "\uf1d8"
-              tooltipText: "Send"
-              enabled: root.linked && composer.text.trim().length > 0
+              iconText: voiceRecorder.recorderState === MediaRecorder.RecordingState ? "\uf04d" : "\uf130"
+              tooltipText: voiceRecorder.recorderState === MediaRecorder.RecordingState ? "Stop and send voice note" : "Record voice note"
+              enabled: root.linked
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onClicked: root.sendReply()
+              onClicked: root.toggleRecording()
             }
           }
+
+          Process {
+            id: filePicker
+            command: [root.pluginDir + "/bin/omarchy-whatsapp-pick-file"]
+            stdout: StdioCollector { id: filePickerOutput; waitForEnd: true }
+            onExited: function(exitCode) {
+              var path = String(filePickerOutput.text || "").trim()
+              if (exitCode === 0 && path.length > 0) root.sendFile(path)
+            }
+          }
+
         }
       }
 

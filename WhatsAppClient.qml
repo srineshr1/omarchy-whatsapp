@@ -59,9 +59,10 @@ Item {
   signal messageArrived(string jid, var message, var chat)
   signal messageReaction(string jid, var message)
   signal messageStatusChanged(string jid, string messageId, int status)
-  signal messageMedia(string jid, string messageId, string imagePath)
+  signal messageMedia(string jid, string messageId, string mediaPath, string mediaKind)
   signal focusRequested(string jid)
   signal commandFailed(string command, string message)
+  signal mediaSendCompleted(string jid)
   signal pairCodeReceived(string code)
   signal sendAcknowledged(string jid)
 
@@ -134,6 +135,16 @@ Item {
     var payload = { t: "send", jid: jid, text: text }
     if (quotedId) payload.quoted = quotedId
     return request(payload)
+  }
+
+  function sendVoiceNote(jid, path) {
+    if (!jid || !path || !path.length) return false
+    return request({ t: "sendVoiceNote", jid: jid, path: path })
+  }
+
+  function sendFile(jid, path) {
+    if (!jid || !path || !path.length) return false
+    return request({ t: "sendFile", jid: jid, path: path })
   }
 
   function react(jid, messageId, emoji) {
@@ -248,8 +259,12 @@ Item {
         root.messageReaction(frame.jid || "", frame.message || null)
         break
 
+      case "sent":
+        if (frame.jid) root.mediaSendCompleted(frame.jid)
+        break
+
       case "messageMedia":
-        root.messageMedia(frame.jid || "", frame.id || "", frame.imagePath || "")
+        root.messageMedia(frame.jid || "", frame.id || "", frame.path || frame.imagePath || "", frame.kind || "image")
         break
 
       case "focus":
