@@ -60,6 +60,7 @@ Item {
   signal messageReaction(string jid, var message)
   signal messageStatusChanged(string jid, string messageId, int status)
   signal messageMedia(string jid, string messageId, string mediaPath, string mediaKind)
+  signal mediaFailed(string jid, string messageId, string mediaKind, string reason)
   signal focusRequested(string jid)
   signal commandFailed(string command, string message)
   signal mediaSendCompleted(string jid)
@@ -145,6 +146,11 @@ Item {
   function sendFile(jid, path) {
     if (!jid || !path || !path.length) return false
     return request({ t: "sendFile", jid: jid, path: path })
+  }
+
+  function downloadMedia(jid, messageId) {
+    if (!jid || !messageId) return false
+    return request({ t: "downloadMedia", jid: jid, id: messageId })
   }
 
   function react(jid, messageId, emoji) {
@@ -265,6 +271,10 @@ Item {
 
       case "messageMedia":
         root.messageMedia(frame.jid || "", frame.id || "", frame.path || frame.imagePath || "", frame.kind || "image")
+        break
+
+      case "mediaFailed":
+        root.mediaFailed(frame.jid || "", frame.id || "", frame.kind || "image", frame.reason || "")
         break
 
       case "focus":

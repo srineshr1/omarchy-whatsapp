@@ -40,7 +40,10 @@ Panel {
   property string listPickerJid: ""
   property int listPickerIndex: 0
   readonly property var customLists: root.client ? (root.client.lists || []) : []
-  readonly property bool peekActive: peekImagePath.length > 0
+  property string peekVideoPath: ""
+  // A video the user pressed play on while it was still downloading.
+  property string pendingVideoId: ""
+  readonly property bool peekActive: peekImagePath.length > 0 || peekVideoPath.length > 0
 
   readonly property var chats: client ? client.chats : []
   readonly property bool daemonOnline: client ? client.daemonOnline : false
@@ -322,6 +325,25 @@ Panel {
     if (!root.client.sendFile(root.activeJid, local)) root.statusLine = "Could not attach file"
   }
 
+  function closePeek() {
+    root.peekImagePath = ""
+    root.peekVideoPath = ""
+  }
+
+  function playVideo(message) {
+    if (!message) return
+    if (message.videoPath) {
+      root.peekVideoPath = message.videoPath
+      return
+    }
+    if (!root.client || !root.client.downloadMedia(root.activeJid, message.id)) {
+      root.statusLine = "Cannot download video while disconnected"
+      return
+    }
+    root.pendingVideoId = message.id
+    root.statusLine = "Downloading video…"
+  }
+
   function toggleRecording() {
     if (voiceRecorder.recorderState === MediaRecorder.RecordingState) {
       root.statusLine = "Sending voice note…"
@@ -466,12 +488,30 @@ Panel {
 
     function onMessageMedia(jid, messageId, mediaPath, mediaKind) {
       if (jid !== root.activeJid || !mediaPath) return
-      root.patchMessage(messageId, mediaKind === "audio" ? { audioPath: mediaPath } : { imagePath: mediaPath })
+      var field = mediaKind === "audio" ? "audioPath" : mediaKind === "video" ? "videoPath" : "imagePath"
+      var fields = {}
+      fields[field] = mediaPath
+      root.patchMessage(messageId, fields)
+      if (mediaKind === "video" && messageId === root.pendingVideoId) {
+        root.pendingVideoId = ""
+        if (root.statusLine === "Downloading video…") root.statusLine = ""
+        root.peekVideoPath = mediaPath
+      }
+    }
+
+    function onMediaFailed(jid, messageId, mediaKind, reason) {
+      if (messageId !== root.pendingVideoId) return
+      root.pendingVideoId = ""
+      root.statusLine = "Could not play video: " + reason
     }
 
     function onCommandFailed(command, message) {
       if (command === "send" || command === "listMember") root.statusLine = message
       if (command === "sendFile" || command === "sendVoiceNote") root.statusLine = message
+      if (command === "downloadMedia") {
+        root.pendingVideoId = ""
+        root.statusLine = message
+      }
       if (command === "refresh") {
         root.refreshing = false
         refreshWatchdog.stop()
@@ -545,7 +585,7 @@ Panel {
       blocked: composer.activeFocus || root.logoutConfirmOpen || root.peekActive || root.listPickerOpen
 
       onCloseRequested: {
-        if (root.peekActive) root.peekImagePath = ""
+        if (root.peekActive) root.closePeek()
         else if (root.logoutConfirmOpen) root.cancelLogout()
         else if (root.view === "chat") root.back()
         else root.close()
@@ -1027,10 +1067,11 @@ Panel {
                   && String(messageRow.modelData.imagePath).length > 0
                 readonly property bool hasAudio: !!messageRow.modelData.audioPath
                   && String(messageRow.modelData.audioPath).length > 0
+                readonly property bool hasVideo: messageRow.modelData.mediaKind === "video"
                 readonly property bool showBody: {
                   var text = messageRow.modelData.text || ""
                   if (!text.length) return false
-                  if (bubbleRow.hasImage && Model.isPhotoPlaceholder(text)) return false
+                  if ((bubbleRow.hasImage || bubbleRow.hasVideo) && Model.isMediaPlaceholder(text)) return false
                   return true
                 }
                 readonly property bool showSender: !messageRow.modelData.fromMe
@@ -1056,6 +1097,7 @@ Panel {
                     width: Math.max(
                       bubbleRow.showSender ? senderLabel.width : 0,
                       bubbleRow.hasImage ? photo.width : 0,
+                      bubbleRow.hasVideo ? videoTile.width : 0,
                       bubbleRow.hasAudio ? audioControl.width : 0,
                       reactionsRow.visible ? reactionsRow.implicitWidth : 0,
                       bodyLabel.visible ? bodyLabel.width : 0,
@@ -1108,6 +1150,56 @@ Panel {
                             color: "#ffffff"
                           }
                         }
+                      }
+                    }
+
+                    Rectangle {
+                      id: videoTile
+                      readonly property bool loading: root.pendingVideoId === messageRow.modelData.id
+                      visible: bubbleRow.hasVideo
+                      width: Math.min(bubbleRow.maxInner, Style.space(220))
+                      height: videoPoster.status === Image.Ready && videoPoster.sourceSize.width > 0
+                        ? Math.min(Style.space(200), videoPoster.sourceSize.height * (width / videoPoster.sourceSize.width))
+                        : width * 9 / 16
+                      radius: Style.cornerRadius > 0 ? Style.cornerRadius : Style.space(4)
+                      color: "#40000000"
+                      clip: true
+
+                      Image {
+                        id: videoPoster
+                        anchors.fill: parent
+                        fillMode: Image.PreserveAspectCrop
+                        asynchronous: true
+                        cache: true
+                        source: messageRow.modelData.videoThumbPath
+                          ? Qt.resolvedUrl("file://" + messageRow.modelData.videoThumbPath)
+                          : ""
+                      }
+
+                      Rectangle {
+                        anchors.centerIn: parent
+                        width: Style.space(40)
+                        height: width
+                        radius: width / 2
+                        color: videoMouse.containsMouse ? "#c0000000" : "#90000000"
+
+                        Text {
+                          anchors.centerIn: parent
+                          // Play glyph sits optically left of centre in most Nerd Fonts.
+                          anchors.horizontalCenterOffset: videoTile.loading ? 0 : Style.space(2)
+                          text: videoTile.loading ? "\uf110" : "\uf04b"
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.title
+                          color: "#ffffff"
+                        }
+                      }
+
+                      MouseArea {
+                        id: videoMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.playVideo(messageRow.modelData)
                       }
                     }
 
@@ -1514,7 +1606,7 @@ Panel {
 
       MouseArea {
         anchors.fill: parent
-        onClicked: root.peekImagePath = ""
+        onClicked: root.closePeek()
       }
     }
 
@@ -1524,7 +1616,22 @@ Panel {
       focus: root.peekActive
 
       Keys.onEscapePressed: function (event) {
-        root.peekImagePath = ""
+        root.closePeek()
+        event.accepted = true
+      }
+      Keys.onSpacePressed: function (event) {
+        if (!peekVideo.visible) return
+        peekVideo.togglePlayback()
+        event.accepted = true
+      }
+      Keys.onLeftPressed: function (event) {
+        if (!peekVideo.visible) return
+        peekVideo.seek(Math.max(0, peekVideo.position - 5000))
+        event.accepted = true
+      }
+      Keys.onRightPressed: function (event) {
+        if (!peekVideo.visible) return
+        peekVideo.seek(Math.min(peekVideo.duration, peekVideo.position + 5000))
         event.accepted = true
       }
 
@@ -1535,16 +1642,93 @@ Panel {
 
         Image {
           id: peekImage
+          visible: root.peekImagePath.length > 0
           anchors.centerIn: parent
           width: Math.min(parent.width, sourceSize.width > 0 ? sourceSize.width : parent.width)
           height: Math.min(parent.height, sourceSize.height > 0 ? sourceSize.height : parent.height)
           fillMode: Image.PreserveAspectFit
           asynchronous: true
-          source: root.peekActive ? Qt.resolvedUrl("file://" + root.peekImagePath) : ""
+          source: peekImage.visible ? Qt.resolvedUrl("file://" + root.peekImagePath) : ""
 
           MouseArea {
             anchors.fill: parent
             onClicked: function (event) { event.accepted = true }
+          }
+        }
+
+        Video {
+          id: peekVideo
+          visible: root.peekVideoPath.length > 0
+          anchors.fill: parent
+          anchors.bottomMargin: peekProgress.height + Style.space(8)
+          fillMode: VideoOutput.PreserveAspectFit
+          autoPlay: true
+          source: root.peekVideoPath.length > 0 ? Qt.resolvedUrl("file://" + root.peekVideoPath) : ""
+
+          function togglePlayback() {
+            if (playbackState === MediaPlayer.PlayingState) pause()
+            else play()
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            onClicked: peekVideo.togglePlayback()
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: peekVideo.playbackState !== MediaPlayer.PlayingState
+            text: "\uf04b"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title * 2
+            color: "#ffffff"
+          }
+        }
+
+        Item {
+          id: peekProgress
+          visible: peekVideo.visible
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          height: Style.space(20)
+
+          Text {
+            id: peekTime
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: Model.formatDuration(peekVideo.position) + " / " + Model.formatDuration(peekVideo.duration)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: "#ffffff"
+          }
+
+          Rectangle {
+            id: peekTrack
+            anchors.left: parent.left
+            anchors.right: peekTime.left
+            anchors.rightMargin: Style.space(10)
+            anchors.verticalCenter: parent.verticalCenter
+            height: Style.space(4)
+            radius: height / 2
+            color: "#50ffffff"
+
+            Rectangle {
+              width: peekVideo.duration > 0 ? parent.width * peekVideo.position / peekVideo.duration : 0
+              height: parent.height
+              radius: parent.radius
+              color: root.bar ? root.bar.urgent : Color.accent
+            }
+          }
+
+          MouseArea {
+            anchors.fill: peekTrack
+            anchors.topMargin: -Style.space(8)
+            anchors.bottomMargin: -Style.space(8)
+            cursorShape: Qt.PointingHandCursor
+            onClicked: function (event) {
+              if (peekVideo.duration > 0) peekVideo.seek(peekVideo.duration * event.x / peekTrack.width)
+            }
           }
         }
       }

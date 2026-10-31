@@ -62,8 +62,14 @@ function sameDay(a, b) {
   return startOfDay(new Date(a * 1000)) === startOfDay(new Date(b * 1000))
 }
 
-function isPhotoPlaceholder(text) {
-  return /^[\uf03e\uf118]?\s*(Photo|Sticker)?$/i.test(String(text || "").trim())
+function formatDuration(ms) {
+  var total = Math.max(0, Math.floor((ms || 0) / 1000))
+  var seconds = total % 60
+  return Math.floor(total / 60) + ":" + (seconds < 10 ? "0" : "") + seconds
+}
+
+function isMediaPlaceholder(text) {
+  return /^[\uf03e\uf118\uf03d]?\s*(Photo|Sticker|Video|Video note)?$/i.test(String(text || "").trim())
 }
 
 function chatTitle(chat) {

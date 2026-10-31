@@ -70,20 +70,30 @@ function bytesToB64(value) {
   return ''
 }
 
-// Media payloads that can be decrypted later. Video and documents stay labels.
+const MEDIA_KINDS = {
+  imageMessage: { kind: 'image', mimetype: 'image/jpeg' },
+  stickerMessage: { kind: 'sticker', mimetype: 'image/webp' },
+  audioMessage: { kind: 'audio', mimetype: 'audio/ogg' },
+  videoMessage: { kind: 'video', mimetype: 'video/mp4' },
+  ptvMessage: { kind: 'video', mimetype: 'video/mp4' }
+}
+
+// Media payloads that can be decrypted later. Documents stay labels.
 export function extractMedia(message) {
   const content = normalizeMessageContent(message)
   if (!content) return null
   const type = getContentType(content)
-  if (type !== 'imageMessage' && type !== 'stickerMessage' && type !== 'audioMessage') return null
+  const known = MEDIA_KINDS[type]
+  if (!known) return null
   const node = content[type]
   if (!node || typeof node !== 'object') return null
   const mediaKey = bytesToB64(node.mediaKey)
   if (!mediaKey || !(node.directPath || node.url)) return null
   const fileLength = Number(node.fileLength || 0)
   return {
-    kind: type === 'stickerMessage' ? 'sticker' : type === 'audioMessage' ? 'audio' : 'image',
-    mimetype: node.mimetype || (type === 'stickerMessage' ? 'image/webp' : type === 'audioMessage' ? 'audio/ogg' : 'image/jpeg'),
+    kind: known.kind,
+    ...(type === 'ptvMessage' ? { ptv: true } : {}),
+    mimetype: node.mimetype || known.mimetype,
     mediaKey,
     directPath: node.directPath || '',
     url: node.url || '',
@@ -91,12 +101,13 @@ export function extractMedia(message) {
     fileSha256: bytesToB64(node.fileSha256),
     fileLength,
     seconds: Number(node.seconds || 0),
-    caption: typeof node.caption === 'string' ? node.caption : ''
+    caption: typeof node.caption === 'string' ? node.caption : '',
+    ...(known.kind === 'video' ? { thumbnail: bytesToB64(node.jpegThumbnail) } : {})
   }
 }
 
-export function isPhotoPlaceholder(text) {
-  return /^[\uf03e\uf118]?\s*(Photo|Sticker)?$/i.test(String(text || '').trim())
+export function isMediaPlaceholder(text) {
+  return /^[\uf03e\uf118\uf03d]?\s*(Photo|Sticker|Video|Video note)?$/i.test(String(text || '').trim())
 }
 
 export function messageType(message) {

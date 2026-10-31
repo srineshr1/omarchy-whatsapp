@@ -108,7 +108,9 @@ export class Store {
       this.me = data.me || null
       for (const list of this.messages.values()) {
         for (const message of list) {
-          if (message.imagePath && !existsSync(message.imagePath)) message.imagePath = ''
+          for (const field of ['imagePath', 'audioPath', 'videoPath', 'videoThumbPath']) {
+            if (message[field] && !existsSync(message[field])) message[field] = ''
+          }
         }
       }
       for (const [from, to] of this.aliases.entries()) {

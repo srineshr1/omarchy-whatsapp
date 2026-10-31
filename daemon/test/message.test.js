@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { extractMedia, reactionDetails } from '../lib/message.js'
+import { extractMedia, isMediaPlaceholder, messageText, reactionDetails } from '../lib/message.js'
 
 test('retains the encrypted payload required to download a voice note', () => {
   const media = extractMedia({
@@ -27,6 +27,38 @@ test('retains the encrypted payload required to download a voice note', () => {
     seconds: 3,
     caption: ''
   })
+})
+
+test('keeps a video downloadable and carries its inline thumbnail', () => {
+  const thumbnail = Buffer.from([0xff, 0xd8, 0xff, 0xd9])
+  const message = {
+    videoMessage: {
+      mimetype: 'video/mp4',
+      mediaKey: Buffer.from('video-key'),
+      directPath: '/v/t62.7161-24/example',
+      fileLength: 2048,
+      seconds: 12,
+      jpegThumbnail: thumbnail
+    }
+  }
+  const media = extractMedia(message)
+
+  assert.equal(media.kind, 'video')
+  assert.equal(media.mimetype, 'video/mp4')
+  assert.equal(media.seconds, 12)
+  assert.equal(media.thumbnail, thumbnail.toString('base64'))
+  assert.equal(media.ptv, undefined)
+  assert.ok(isMediaPlaceholder(messageText(message)))
+})
+
+test('treats a round video note as a video', () => {
+  const media = extractMedia({
+    ptvMessage: { mediaKey: Buffer.from('ptv-key'), directPath: '/v/example' }
+  })
+
+  assert.equal(media.kind, 'video')
+  assert.equal(media.ptv, true)
+  assert.equal(media.mimetype, 'video/mp4')
 })
 
 test('extracts the target and emoji from a reaction protocol message', () => {

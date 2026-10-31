@@ -19,8 +19,8 @@ import { Store, normalizeJid, pinRank } from './lib/store.js'
 import { scanAppState } from './lib/appstate.js'
 import { Notifier } from './lib/notify.js'
 import { Bus } from './lib/server.js'
-import { extractMedia, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid, reactionDetails } from './lib/message.js'
-import { existingMediaPath, MediaCache } from './lib/media.js'
+import { extractMedia, isGroupJid, isIgnorableChat, isMediaPlaceholder, isSilent, messageText, messageType, prettyJid, reactionDetails } from './lib/message.js'
+import { existingMediaPath, MediaCache, pathField, writeVideoThumbnail } from './lib/media.js'
 import {
   applyChatNotificationPreferences,
   isChatMuted,
@@ -303,9 +303,10 @@ function storedToWaContent(message) {
   if (!message) return undefined
   if (message.media) {
     const node = { mimetype: message.media.mimetype }
-    if (message.text && !isPhotoPlaceholder(message.text)) node.caption = message.text
+    if (message.text && !isMediaPlaceholder(message.text)) node.caption = message.text
     if (message.media.kind === 'sticker') return { stickerMessage: node }
     if (message.media.kind === 'audio') return { audioMessage: node }
+    if (message.media.kind === 'video') return message.media.ptv ? { ptvMessage: node } : { videoMessage: node }
     return { imageMessage: node }
   }
   if (!message.text) return undefined
@@ -331,7 +332,8 @@ function isRecentIncoming(message) {
 // store persists.
 function publicMessage(message) {
   if (!message) return message
-  const { media: _ignored, retryMessage: _retryMessage, ...rest } = message
+  const { media, retryMessage: _retryMessage, ...rest } = message
+  if (media?.kind) rest.mediaKind = media.kind
   return rest
 }
 
@@ -395,11 +397,10 @@ function flatten(chatJid, message) {
     }
   }
   if (attachment) {
-    const { caption, ...payload } = attachment
+    const { caption, thumbnail, ...payload } = attachment
     flat.media = payload
-    const cachedPath = existingMediaPath({ id, media: payload, imagePath: '' })
-    if (payload.kind === 'audio') flat.audioPath = cachedPath
-    else flat.imagePath = cachedPath
+    flat[pathField(payload.kind)] = existingMediaPath({ id, media: payload })
+    if (payload.kind === 'video') flat.videoThumbPath = writeVideoThumbnail(id, thumbnail)
   }
   return flat
 }
@@ -450,7 +451,7 @@ function ingest(chatJid, raw) {
   if (message.fromMe) store.setUnread(canonicalTarget, 0)
 
   const chatKey = normalizeJid(canonicalTarget)
-  if (message.media && !message.imagePath && (wantedChats.has(chatKey) || wantedChats.has(canonicalTarget))) {
+  if (message.media && !message[pathField(message.media.kind)] && (wantedChats.has(chatKey) || wantedChats.has(canonicalTarget))) {
     media.enqueue(canonicalTarget, message)
   }
   return { message, canonicalTarget, existed }
@@ -1073,7 +1074,7 @@ async function connect() {
           }
         }
         if (!live) continue
-        if (message.media && !message.imagePath) media.enqueue(canonicalTarget, message)
+        if (message.media && !message[pathField(message.media.kind)]) media.enqueue(canonicalTarget, message)
         bus.broadcast({
           t: 'message',
           jid: canonicalTarget,
@@ -1203,7 +1204,7 @@ async function refreshMissingMedia(jid, list) {
   if (!sock || connection !== 'open') return
   if (typeof sock.requestPlaceholderResend !== 'function') return
   const missing = list.filter((message) => (
-    (message.type === 'imageMessage' || message.type === 'stickerMessage' || message.type === 'audioMessage')
+    ['imageMessage', 'stickerMessage', 'audioMessage', 'videoMessage', 'ptvMessage'].includes(message.type)
     && !message.media
     && message.key?.id
   ))
@@ -1440,6 +1441,21 @@ async function handleCommand(payload, reply) {
       return
     }
 
+    case 'downloadMedia': {
+      const rawJid = payload.jid
+      const messageId = String(payload.id || '')
+      if (!rawJid || !messageId) throw new Error('downloadMedia: chat and message are required')
+      const canonical = store.canonicalJid(rawJid) || rawJid
+      const target = store.findMessage(canonical, messageId)
+      if (!target?.media) throw new Error('downloadMedia: media is no longer available locally')
+      if (!existingMediaPath(target) && (!sock || connection !== 'open')) {
+        throw new Error('downloadMedia: not connected to WhatsApp')
+      }
+      media.enqueue(canonical, target, { fetch: true })
+      reply({ t: 'ack', id, ok: true, jid: rawJid })
+      return
+    }
+
     case 'react': {
       const rawJid = payload.jid
       const messageId = String(payload.id || '')
@@ -1626,10 +1642,11 @@ async function main() {
   media.onReady = (jid, message) => {
     store.markDirty()
     const kind = message.media?.kind || 'image'
-    const path = message.imagePath || message.audioPath || ''
-    if (kind === 'audio') message.audioPath = path
-    else message.imagePath = path
+    const path = message[pathField(kind)] || ''
     bus.broadcast({ t: 'messageMedia', jid, id: message.id, path, kind })
+  }
+  media.onFailed = (jid, message, reason) => {
+    bus.broadcast({ t: 'mediaFailed', jid, id: message.id, kind: message.media?.kind || 'image', reason })
   }
 
   bus.snapshot = snapshot
