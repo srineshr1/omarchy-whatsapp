@@ -112,6 +112,25 @@ function statusIsRead(status) {
   return (status | 0) >= 4
 }
 
+function reactionGroups(reactions) {
+  var groups = []
+  var list = reactions || []
+  for (var i = 0; i < list.length; i++) {
+    var emoji = String(list[i] && list[i].emoji || "")
+    if (!emoji) continue
+    var existing = null
+    for (var j = 0; j < groups.length; j++) {
+      if (groups[j].emoji === emoji) {
+        existing = groups[j]
+        break
+      }
+    }
+    if (existing) existing.count++
+    else groups.push({ emoji: emoji, count: 1 })
+  }
+  return groups
+}
+
 function connectionLabel(state, needsLogin, daemonOnline, pairingStopped) {
   if (needsLogin) {
     if (state === "qr") return "Scan QR"
@@ -233,6 +252,5 @@ function formatMessageText(text, linkColor) {
 
   return docPrefix + result
 }
-
 
 

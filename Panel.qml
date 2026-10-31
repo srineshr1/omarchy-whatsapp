@@ -56,6 +56,16 @@ Panel {
   readonly property color secondaryForeground: Qt.darker(root.foreground, 1.5)
   readonly property int chatLimit: root.setting("chatLimit", 40)
   readonly property int messageLimit: root.setting("messageLimit", 60)
+  property string reactionTargetId: ""
+  property real reactionMenuX: 0
+  property real reactionMenuY: 0
+
+  Timer {
+    id: reactionDismissTimer
+    interval: 500
+    onTriggered: root.reactionTargetId = ""
+  }
+
 
   function open() { root.controller.show() }
   function close() { root.controller.hide() }
@@ -259,6 +269,12 @@ Panel {
     }
   }
 
+  function sendReaction(messageId, emoji) {
+    if (!root.client || !root.client.ready || !root.activeJid) return
+    if (!root.client.react(root.activeJid, messageId, emoji)) root.statusLine = "Could not send reaction"
+    root.reactionTargetId = ""
+  }
+
   function openWebClient() {
     webLauncher.running = true
   }
@@ -366,6 +382,11 @@ Panel {
       if (root.opened && root.client && root.client.ready) root.client.markRead(jid)
     }
 
+    function onMessageReaction(jid, message) {
+      if (jid !== root.activeJid || !message) return
+      root.patchMessage(message.id, { reactions: message.reactions || [] })
+    }
+
     function onMessageStatusChanged(jid, messageId, status) {
       // Receipt JIDs are often a LID or device-suffixed form that does not
       // equal activeJid. Apply by message id in the open thread.
@@ -439,7 +460,9 @@ Panel {
     owner: root.hostWidget || root
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
+    // KeyboardPanel gives this target focus after it has finished opening.
+    // A conversation should be ready to type into immediately.
+    focusTarget: root.view === "chat" ? composer : keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
@@ -959,6 +982,7 @@ Panel {
                     width: Math.max(
                       bubbleRow.showSender ? senderLabel.width : 0,
                       bubbleRow.hasImage ? photo.width : 0,
+                      reactionsRow.visible ? reactionsRow.implicitWidth : 0,
                       bodyLabel.visible ? bodyLabel.width : 0,
                       Math.min(metaLabel.implicitWidth, bubbleRow.maxInner))
 
@@ -1051,6 +1075,118 @@ Panel {
                         : root.secondaryForeground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
+                    }
+
+                    Row {
+                      id: reactionsRow
+                      visible: (messageRow.modelData.reactions || []).length > 0
+                      spacing: Style.space(3)
+
+                      Repeater {
+                        model: Model.reactionGroups(messageRow.modelData.reactions || [])
+                        delegate: Rectangle {
+                          required property var modelData
+                          width: reactionLabel.implicitWidth + Style.space(10)
+                          height: Style.space(22)
+                          radius: height / 2
+                          color: Style.normalFillFor(root.foreground, Color.accent)
+                          border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.28)
+                          border.width: 1
+
+                          Text {
+                            id: reactionLabel
+                            anchors.centerIn: parent
+                            text: modelData.emoji + (modelData.count > 1 ? " " + modelData.count : "")
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+                      }
+                    }
+                  }
+
+                }
+
+                HoverHandler {
+                  id: bubbleHover
+                  onHoveredChanged: {
+                    if (hovered) reactionDismissTimer.stop()
+                    else reactionDismissTimer.restart()
+                  }
+                }
+
+                Rectangle {
+                  id: reactionButton
+                  visible: bubbleHover.hovered || reactionButtonMouse.containsMouse
+                    || root.reactionTargetId === messageRow.modelData.id
+                  width: Math.max(Style.space(22), Style.font.icon + Style.spacing.sm * 2)
+                  height: width
+                  x: Math.min(bubble.x + bubble.width + Style.space(2), bubbleRow.width - width)
+                  y: bubble.y + (bubble.height - height) / 2
+                  radius: Style.cornerRadius
+                  color: reactionButtonMouse.containsMouse
+                    ? Style.hoverFillFor(root.secondaryForeground, root.secondaryForeground)
+                    : "transparent"
+
+                  Text {
+                    anchors.centerIn: parent
+                    text: "\uf118"
+                    color: reactionButtonMouse.containsMouse ? root.foreground : root.secondaryForeground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.icon
+                  }
+
+                  MouseArea {
+                    id: reactionButtonMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onContainsMouseChanged: {
+                      if (containsMouse) reactionDismissTimer.stop()
+                      else if (!bubbleHover.hovered && !reactionPaletteHover.containsMouse) reactionDismissTimer.restart()
+                    }
+                    onClicked: {
+                      root.reactionTargetId = root.reactionTargetId === messageRow.modelData.id ? "" : messageRow.modelData.id
+                      reactionDismissTimer.stop()
+                    }
+                  }
+                }
+
+                Item {
+                  id: reactionPalette
+                  visible: root.reactionTargetId === messageRow.modelData.id
+                  z: 10
+                  width: reactionEmojiRow.implicitWidth
+                  height: reactionEmojiRow.implicitHeight
+                  x: Math.max(0, Math.min(reactionButton.x + reactionButton.width / 2 - width / 2, bubbleRow.width - width))
+                  y: reactionButton.y - height - Style.space(3)
+
+                  MouseArea {
+                    id: reactionPaletteHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.NoButton
+                    onContainsMouseChanged: {
+                      if (containsMouse) reactionDismissTimer.stop()
+                      else if (!bubbleHover.hovered && !reactionButtonMouse.containsMouse) reactionDismissTimer.restart()
+                    }
+                  }
+
+                  Row {
+                    id: reactionEmojiRow
+                    spacing: Style.space(2)
+
+                    Repeater {
+                      model: ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+                      delegate: PanelActionButton {
+                        required property string modelData
+                        iconText: modelData
+                        tooltipText: "React " + modelData
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: root.sendReaction(messageRow.modelData.id, modelData)
+                      }
                     }
                   }
                 }

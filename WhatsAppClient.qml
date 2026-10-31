@@ -57,6 +57,7 @@ Item {
 
   signal messagesLoaded(string jid, var chat, var messages)
   signal messageArrived(string jid, var message, var chat)
+  signal messageReaction(string jid, var message)
   signal messageStatusChanged(string jid, string messageId, int status)
   signal messageMedia(string jid, string messageId, string imagePath)
   signal focusRequested(string jid)
@@ -133,6 +134,11 @@ Item {
     var payload = { t: "send", jid: jid, text: text }
     if (quotedId) payload.quoted = quotedId
     return request(payload)
+  }
+
+  function react(jid, messageId, emoji) {
+    if (!jid || !messageId || !emoji) return false
+    return request({ t: "react", jid: jid, id: messageId, emoji: emoji })
   }
 
   property bool setupTried: false
@@ -236,6 +242,10 @@ Item {
 
       case "messageStatus":
         root.messageStatusChanged(frame.jid || "", frame.id || "", frame.status || 0)
+        break
+
+      case "messageReaction":
+        root.messageReaction(frame.jid || "", frame.message || null)
         break
 
       case "messageMedia":

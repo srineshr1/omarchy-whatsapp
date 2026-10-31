@@ -104,6 +104,19 @@ export function messageType(message) {
   return getContentType(content) || ''
 }
 
+// Reactions arrive as protocol messages whose target is another message in
+// the same chat. They are not standalone messages for the panel to render.
+export function reactionDetails(message) {
+  const rawContent = normalizeMessageContent(message)
+  if (!rawContent) return null
+  const content = unwrapMessage(rawContent) || rawContent
+  if (getContentType(content) !== 'reactionMessage') return null
+  const reaction = content.reactionMessage
+  const key = reaction?.key
+  if (!key?.id) return null
+  return { id: key.id, text: typeof reaction.text === 'string' ? reaction.text : '' }
+}
+
 function unwrapMessage(content) {
   if (!content) return null
   let curr = content

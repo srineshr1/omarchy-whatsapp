@@ -605,6 +605,26 @@ export class Store {
     return undefined
   }
 
+  applyReaction(jid, messageId, reaction) {
+    const target = this.findMessage(jid, messageId)
+    if (!target || !reaction?.senderJid) return null
+
+    const senderJid = normalizeJid(reaction.senderJid)
+    const previous = Array.isArray(target.reactions) ? target.reactions : []
+    const next = previous.filter((entry) => normalizeJid(entry?.senderJid) !== senderJid)
+    if (reaction.emoji) {
+      next.push({
+        emoji: reaction.emoji,
+        senderJid,
+        senderName: reaction.senderName || '',
+        fromMe: reaction.fromMe === true
+      })
+    }
+    target.reactions = next
+    this.markDirty()
+    return target
+  }
+
   clear() {
     this.chats.clear()
     this.messages.clear()
