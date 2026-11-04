@@ -22,10 +22,13 @@ export function stageOutgoing(source, wanted, options = {}) {
   const name = basename(wanted ? String(wanted) : String(source || ''))
   if (!name || name === '.' || name === '..') throw new Error('stage: no file given')
 
+  // Only a file is copied. A device or a pipe would copy for ever, or fill
+  // the disk, and neither is a file the user picked.
+  const info = statSync(source)
+  if (!info.isFile()) throw new Error('stage: not a file')
   // The size is checked before the copy: a file the daemon would refuse is
   // not written to the cache first.
-  const size = statSync(source).size
-  if (size > MAX_UPLOAD_BYTES) throw new Error(`stage: file is too large (${MAX_UPLOAD_BYTES} bytes max)`)
+  if (info.size > MAX_UPLOAD_BYTES) throw new Error(`stage: file is too large (${MAX_UPLOAD_BYTES} bytes max)`)
 
   // Each staged file gets its own directory, so the name that travels is the
   // name the user gave it and two files of the same name never land on each

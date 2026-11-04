@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, sep } from 'node:path'
@@ -242,4 +242,17 @@ test('the copies that were never sent are swept', () => {
   sweepStaged()
 
   assert.equal(existsSync(staged), false)
+})
+
+test('a device or a pipe is not copied', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'omarchy-whatsapp-stage-'))
+  const fifo = join(dir, 'pipe')
+  // A pipe has no size and the copy of it would never end.
+  execFileSync('mkfifo', [fifo])
+
+  const result = spawnSync(STAGER, [fifo], { encoding: 'utf8', env: process.env, timeout: 1000 })
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr, 'omarchy-whatsapp-stage: stage: not a file\n')
+  assert.equal(existsSync(fifo), true)
 })

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Copies a file into the directory the daemon can read, and prints where it
 // landed. The daemon runs with a private /tmp, so a file picked in the panel
-// or recorded there has to be moved before it can be sent.
+// or recorded there has to be moved before it can be sent. Only regular
+// files are accepted; devices and named pipes are rejected before copying.
 //
 // --remove-source says the file is a temporary: it goes away once the copy is
 // there. A file the user picked is never removed.
