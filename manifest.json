@@ -17,6 +17,8 @@
       "socketPath": "",
       "autostartDaemon": true,
       "showUnreadCount": true,
+      "notifications": "On",
+      "notificationSound": "On",
       "hideWhenEmpty": false,
       "chatLimit": 40,
       "messageLimit": 60,
@@ -26,6 +28,8 @@
     "schema": [
       { "key": "socketPath", "type": "string", "label": "Daemon socket path (blank = default)" },
       { "key": "autostartDaemon", "type": "bool", "label": "Start the daemon automatically" },
+      { "key": "notifications", "type": "enum", "label": "Desktop notifications", "options": ["Off", "On"], "defaultValue": "On" },
+      { "key": "notificationSound", "type": "enum", "label": "Notification sound", "options": ["Off", "On"], "defaultValue": "On" },
       { "key": "showUnreadCount", "type": "bool", "label": "Show unread count next to the icon" },
       { "key": "hideWhenEmpty", "type": "bool", "label": "Hide the widget when there is nothing unread" },
       { "key": "chatLimit", "type": "int", "label": "Chats listed in the panel" },

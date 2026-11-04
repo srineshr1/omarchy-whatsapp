@@ -1,5 +1,6 @@
 import { mediaMessageFor, prepareUpload } from './outgoing.js'
 import { discardStaged } from './staging.js'
+import { logger } from './logger.js'
 
 // One file, one WhatsApp message.
 //
@@ -36,6 +37,7 @@ export async function handleSendMedia(payload, reply, deps) {
     // puts the caption and the file back, and the daemon asks WhatsApp for a
     // new connection: the stuck upload goes with the connection that carried
     // it, and the daemon can do something else.
+    logger.warn({ err: String(err?.message || err), id }, 'media: the upload failed')
     reply({ t: 'error', for: 'sendMedia', id, message: err?.message || 'the message was not sent' })
     deps.reconnect?.()
     return
@@ -48,14 +50,16 @@ export async function handleSendMedia(payload, reply, deps) {
     return
   }
 
-  // The copy the daemon made for this message has done its job: WhatsApp has
-  // the file now. A file that could not go out stays where it is, so it can
-  // be tried again without the user picking it all over again.
-  discardStaged(upload.path)
-
   // The panel learns about the message the same way it learns about any other:
   // through the shared fan-out, so every monitor shows it.
   deliver(routingJid, rawJid, sent)
 
   reply({ t: 'ack', id, ok: true, jid: rawJid })
+
+  // The copy the daemon made for this message has done its job: WhatsApp has
+  // the file now. It goes after the answer, so that a failure in between does
+  // not leave the panel holding an attachment that is not there any more. A
+  // file that could not go out stays where it is, so it can be tried again
+  // without the user picking it all over again.
+  discardStaged(upload.path)
 }

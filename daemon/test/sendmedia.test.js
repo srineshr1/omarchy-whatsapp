@@ -288,6 +288,7 @@ test('the copy that went out does not stay behind', async () => {
 test('a copy that could not go out stays, so it can be tried again', async () => {
   const source = tempFile('photo.png')
   const staged = stageOutgoing(source)
+  let reconnected = false
 
   await withBus(
     (payload, reply) => handleSendMedia(payload, reply, {
@@ -298,7 +299,8 @@ test('a copy that could not go out stays, so it can be tried again', async () =>
       },
       connection: 'open',
       store: { routingJid: (jid) => jid },
-      deliver: () => {}
+      deliver: () => {},
+      reconnect: () => { reconnected = true }
     }),
     async (socketPath) => {
       const socket = await connect(socketPath)
@@ -310,13 +312,15 @@ test('a copy that could not go out stays, so it can be tried again', async () =>
       // The panel waits for an answer, and it always gets one.
       assert.equal(frame.t, 'error')
       assert.equal(frame.for, 'sendMedia')
-      assert.equal(frame.t, 'error')
     }
   )
 
   // The panel puts the file back in front of the user, so the copy it needs
   // has to still be there.
   assert.equal(existsSync(staged), true)
+  // And the daemon asks for a new connection, so the upload that failed does
+  // not keep it from doing anything else.
+  assert.equal(reconnected, true)
   discardStaged(staged)
 })
 
@@ -381,3 +385,30 @@ test('a message that did not go out is not acknowledged', async () => {
   )
 })
 
+
+
+test('a delivery failure keeps the staged copy available with an error reply', async () => {
+  const staged = stageOutgoing(tempFile('photo.png'))
+  let sends = 0
+  try {
+    await withBus(
+      (payload, reply) => handleSendMedia(payload, reply, {
+        sock: { async sendMessage() { sends += 1; return { key: { id: 'MSG1' } } } },
+        connection: 'open',
+        store: { routingJid: (jid) => jid },
+        deliver: () => { throw new Error('delivery failed') }
+      }),
+      async (socketPath) => {
+        const socket = await connect(socketPath)
+        const answer = readFrame(socket)
+        socket.write(JSON.stringify({ t: 'sendMedia', id: 'failure-1', jid: '123@s.whatsapp.net', path: staged }) + '\n')
+        assert.deepEqual(await answer, { t: 'error', for: 'sendMedia', id: 'failure-1', message: 'delivery failed' })
+        socket.destroy()
+      }
+    )
+    assert.equal(sends, 1)
+    assert.equal(existsSync(staged), true)
+  } finally {
+    discardStaged(staged)
+  }
+})

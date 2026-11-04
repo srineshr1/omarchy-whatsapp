@@ -6,6 +6,7 @@ import Quickshell
 import Quickshell.Wayland
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -29,6 +30,33 @@ Panel {
   property var messages: []
   property int cursorIndex: 0
   property string statusLine: ""
+  readonly property bool notificationsEnabled: root.setting("notifications", "On") !== "Off"
+    && root.setting("notifications", "On") !== false
+  readonly property bool notificationSoundEnabled: root.setting("notificationSound", "On") !== "Off"
+    && root.setting("notificationSound", "On") !== false
+  readonly property bool alertsEnabled: notificationsEnabled || notificationSoundEnabled
+  readonly property bool notificationUpdatePending: notificationUpdater.running
+  property string notificationTarget: "On"
+
+  function toggleNotifications() {
+    if (notificationUpdater.running) return
+    root.notificationTarget = root.alertsEnabled ? "Off" : "On"
+    notificationUpdater.running = true
+  }
+
+  // Use the host CLI so settings persist and reload on every monitor. The
+  // fixed shell program accepts only the internally selected On/Off argument.
+  Process {
+    id: notificationUpdater
+    command: ["sh", "-c",
+      'omarchy bar set io.github.ricky.whatsapp notifications "$1" && '
+        + 'omarchy bar set io.github.ricky.whatsapp notificationSound "$1"',
+      "whatsapp-notifications", root.notificationTarget]
+    onExited: function (exitCode, exitStatus) {
+      if (exitCode !== 0 || exitStatus !== 0)
+        root.statusLine = "Could not update notification settings"
+    }
+  }
   // What is waiting for the daemon to accept, and what to put back if it does
   // not: { jid, text, path }.
   property var pendingSend: null
@@ -51,7 +79,7 @@ Panel {
   // and the name it is given, so two requests in flight would mix them up.
   property var stagingQueue: []
   // The colour the drop surface tints itself with.
-  readonly property color dropTint: bar ? bar.urgent : Color.accent
+  readonly property color dropTint: bar ? bar.urgent : Commons.Color.accent
   property bool pinToLatest: true
   property bool logoutConfirmOpen: false
   property bool refreshing: false
@@ -77,7 +105,7 @@ Panel {
   // Popup content must use the theme foreground. barForeground can switch to
   // a wallpaper-contrast color when the bar is transparent, which may be dark
   // even though the popup surface remains dark.
-  readonly property color foreground: root.bar ? root.bar.foreground : Color.foreground
+  readonly property color foreground: root.bar ? root.bar.foreground : Commons.Color.foreground
   readonly property color secondaryForeground: Qt.darker(root.foreground, 1.5)
   readonly property int chatLimit: root.setting("chatLimit", 40)
   readonly property int messageLimit: root.setting("messageLimit", 60)
@@ -868,8 +896,8 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             radius: 0
             color: backMouse.containsMouse
-              ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
-              : Style.normalFillFor(root.foreground, Color.accent)
+              ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Commons.Color.accent)
+              : Style.normalFillFor(root.foreground, Commons.Color.accent)
             border.color: root.foreground
             border.width: 1
 
@@ -921,7 +949,7 @@ Panel {
                 return unread > 0 ? unread + " unread" : ""
               }
               visible: text.length > 0
-              color: root.statusLine.length > 0 ? (root.bar ? root.bar.urgent : Color.urgent) : root.secondaryForeground
+              color: root.statusLine.length > 0 ? (root.bar ? root.bar.urgent : Commons.Color.urgent) : root.secondaryForeground
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
@@ -933,6 +961,17 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
+
+            PanelActionButton {
+              objectName: "notificationBell"
+              iconText: root.alertsEnabled ? "\uf0f3" : "\uf1f6"
+              tooltipText: root.alertsEnabled ? "Mute notifications and sound" : "Enable notifications and sound"
+              enabled: !root.notificationUpdatePending
+              focusable: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.toggleNotifications()
+            }
 
             PanelActionButton {
               visible: !root.showLogin
@@ -960,7 +999,7 @@ Panel {
               iconText: "\uf011"
               tooltipText: "Log out of WhatsApp"
               foreground: root.foreground
-              hoverColor: root.bar ? root.bar.urgent : Color.urgent
+              hoverColor: root.bar ? root.bar.urgent : Commons.Color.urgent
               fontFamily: root.fontFamily
               onClicked: root.requestLogout()
             }
@@ -1050,11 +1089,11 @@ Panel {
               height: ListView.view.height
               radius: height / 2
               color: listChip.active
-                ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
+                ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Commons.Color.accent)
                 : chipMouse.containsMouse
-                  ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
-                  : Style.normalFillFor(root.foreground, Color.accent)
-              border.color: listChip.active ? (root.bar ? root.bar.urgent : Color.accent) : "transparent"
+                  ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Commons.Color.accent)
+                  : Style.normalFillFor(root.foreground, Commons.Color.accent)
+              border.color: listChip.active ? (root.bar ? root.bar.urgent : Commons.Color.accent) : "transparent"
               border.width: 1
 
               Text {
@@ -1139,7 +1178,7 @@ Panel {
                 implicitHeight: rowText.implicitHeight + Style.space(10)
                 height: implicitHeight
                 foreground: root.foreground
-                accent: root.bar ? root.bar.urgent : Color.accent
+                accent: root.bar ? root.bar.urgent : Commons.Color.accent
                 hasCursor: root.cursorIndex === chatRow.index
 
                 Column {
@@ -1201,13 +1240,13 @@ Panel {
                     width: implicitWidth
                     height: implicitHeight
                     radius: height / 2
-                    color: root.bar ? root.bar.urgent : Color.urgent
+                    color: root.bar ? root.bar.urgent : Commons.Color.urgent
 
                     Text {
                       id: badgeLabel
                       anchors.centerIn: parent
                       text: Model.badgeText(chatRow.modelData.unread)
-                      color: Color.background
+                      color: Commons.Color.background
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                       font.bold: true
@@ -1317,8 +1356,8 @@ Panel {
                   anchors.left: messageRow.modelData.fromMe ? undefined : parent.left
                   radius: Style.cornerRadius > 0 ? Style.cornerRadius : Style.space(6)
                   color: messageRow.modelData.fromMe
-                    ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
-                    : Style.normalFillFor(root.foreground, Color.accent)
+                    ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Commons.Color.accent)
+                    : Style.normalFillFor(root.foreground, Commons.Color.accent)
 
                   Column {
                     id: bubbleContent
@@ -1337,7 +1376,7 @@ Panel {
                       visible: bubbleRow.showSender
                       width: Math.min(implicitWidth, bubbleRow.maxInner)
                       text: messageRow.modelData.senderName || ""
-                      color: root.bar ? root.bar.urgent : Color.accent
+                      color: root.bar ? root.bar.urgent : Commons.Color.accent
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                       font.bold: true
@@ -1395,7 +1434,7 @@ Panel {
                         height: width
                         radius: width / 2
                         color: root.playingMessageId === messageRow.modelData.id
-                          ? (root.bar ? root.bar.urgent : Color.accent)
+                          ? (root.bar ? root.bar.urgent : Commons.Color.accent)
                           : "transparent"
                         border.color: root.foreground
                         border.width: 1
@@ -1404,7 +1443,7 @@ Panel {
                           anchors.centerIn: parent
                           text: root.playingMessageId === messageRow.modelData.id ? "\uf04d" : "\uf04b"
                           color: root.playingMessageId === messageRow.modelData.id
-                            ? (root.bar ? root.bar.barForeground : Color.background)
+                            ? (root.bar ? root.bar.barForeground : Commons.Color.background)
                             : root.foreground
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
@@ -1432,9 +1471,9 @@ Panel {
                       visible: bubbleRow.showBody
                       width: Math.min(implicitWidth, bubbleRow.maxInner)
                       textFormat: Text.StyledText
-                      text: Model.formatMessageText(messageRow.modelData.text, root.bar ? root.bar.urgent : Color.accent)
+                      text: Model.formatMessageText(messageRow.modelData.text, root.bar ? root.bar.urgent : Commons.Color.accent)
                       color: root.foreground
-                      linkColor: root.bar ? root.bar.urgent : Color.accent
+                      linkColor: root.bar ? root.bar.urgent : Commons.Color.accent
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
                       wrapMode: Text.Wrap
@@ -1462,7 +1501,7 @@ Panel {
                         return stampText + " " + Model.statusGlyph(messageRow.modelData.status)
                       }
                       color: messageRow.modelData.fromMe && Model.statusIsRead(messageRow.modelData.status)
-                        ? (root.bar ? root.bar.urgent : Color.accent)
+                        ? (root.bar ? root.bar.urgent : Commons.Color.accent)
                         : root.secondaryForeground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
@@ -1528,12 +1567,13 @@ Panel {
 
             TextField {
               id: composer
+              objectName: "messageComposer"
               anchors.left: parent.left
               anchors.right: attachButton.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
               foreground: root.foreground
-              accent: root.bar ? root.bar.urgent : Color.accent
+              accent: root.bar ? root.bar.urgent : Commons.Color.accent
               placeholderText: root.linked ? "Reply\u2026" : "Not connected"
               enabled: root.linked
               onAccepted: root.sendReply()
@@ -1572,7 +1612,7 @@ Panel {
               iconText: root.recording ? "\uf04d" : "\uf130"
               tooltipText: root.recording ? "Stop recording" : "Record a voice note"
               enabled: root.linked
-              foreground: root.recording ? (root.bar ? root.bar.urgent : Color.accent) : root.foreground
+              foreground: root.recording ? (root.bar ? root.bar.urgent : Commons.Color.accent) : root.foreground
               fontFamily: root.fontFamily
               onClicked: {
                 if (root.recording) root.stopRecording()
@@ -1633,7 +1673,7 @@ Panel {
         visible: root.listPickerOpen
         anchors.fill: parent
         z: 10
-        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.94)
+        color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.94)
         focus: root.listPickerOpen
 
         Keys.onPressed: function (event) {
@@ -1687,7 +1727,7 @@ Panel {
               width: parent.width
               height: pickerLabel.implicitHeight + Style.space(10)
               foreground: root.foreground
-              accent: root.bar ? root.bar.urgent : Color.accent
+              accent: root.bar ? root.bar.urgent : Commons.Color.accent
               hasCursor: root.listPickerIndex === pickerRow.index
 
               Text {

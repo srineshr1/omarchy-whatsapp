@@ -84,6 +84,7 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 | Reorder pinned chats (this panel only) | `Shift+↑` / `Shift+↓`, or `Shift+K` / `Shift+J` |
 | Add the chat to / remove it from your lists | `l`, then `Enter` to toggle, `Escape` when done |
 | Refresh chats | Refresh button, or `r` |
+| Mute or enable desktop notifications and sound | Bell button in the panel header |
 | Open a chat | `Enter` |
 | Reply | Type, then `Enter` |
 | Attach an image or a file | The paperclip next to the reply box, then `Enter` to send |
@@ -97,7 +98,8 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 | Open a chat from a notification | Click the notification |
 
 A file is sent as an image, a video or a document, depending on what it is, and
-whatever was typed in the reply box travels as its caption. The name of the
+whatever was typed in the reply box travels as its caption. Only regular files
+can be attached; devices and named pipes are rejected before copying. The name of the
 file you picked shows above the box; click it to take the file back, and it
 goes with the conversation it was picked for. A file dropped on the panel
 becomes the attachment the same way, so a screenshot is a file like any other.
@@ -163,11 +165,39 @@ and hot-reload on save:
 | `socketPath` | `""` | Daemon socket; blank uses `$XDG_RUNTIME_DIR/omarchy-whatsapp.sock` |
 | `autostartDaemon` | `true` | Start the daemon if the socket is missing |
 | `showUnreadCount` | `true` | Show the count next to the icon |
+| `notifications` | `"On"` | Desktop notification popups (`"Off"` disables them) |
+| `notificationSound` | `"On"` | Message alert sound (`"Off"` silences it) |
 | `hideWhenEmpty` | `false` | Hide the widget entirely when nothing is unread |
 | `chatLimit` | `40` | Chats listed in the panel |
 | `messageLimit` | `60` | Messages loaded per conversation |
 | `webAppUrl` | `https://web.whatsapp.com` | Full client URL |
 | `webAppPattern` | `web.whatsapp.com` | Window pattern used to focus the full client |
+
+To silence incoming messages while keeping popups, set `notificationSound` to
+`"Off"`. To disable popups too, set both options to `"Off"`:
+
+```json
+{ "id": "io.github.ricky.whatsapp", "notifications": "Off", "notificationSound": "Off" }
+```
+
+These independent settings apply to all monitors and are read by the daemon
+before delivering each alert, without a restart. They do not change the unread
+badge, message delivery, or voice-note playback. Chat mutes and archive rules
+still suppress both channels. Existing `OMARCHY_WHATSAPP_NO_NOTIFY=1` (all alerts)
+and `OMARCHY_WHATSAPP_NO_SOUND=1` (sound only) environment overrides remain in effect.
+The full WhatsApp Web client's notifications are separate.
+
+The panel header bell silences both popups and alert sound; click the slashed
+bell to enable both again. The bell indicates enabled when either channel is
+on. Changes persist and apply to every monitor. For independent control:
+
+```sh
+omarchy bar set io.github.ricky.whatsapp notifications On
+omarchy bar set io.github.ricky.whatsapp notificationSound Off
+```
+
+After upgrading, restart the daemon once (`omarchy-whatsapp restart`) to load
+the new notification behavior. Later setting changes need no restart.
 
 Move the widget:
 
