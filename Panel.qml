@@ -27,6 +27,33 @@ Panel {
   property var messages: []
   property int cursorIndex: 0
   property string statusLine: ""
+  readonly property bool notificationsEnabled: root.setting("notifications", "On") !== "Off"
+    && root.setting("notifications", "On") !== false
+  readonly property bool notificationSoundEnabled: root.setting("notificationSound", "On") !== "Off"
+    && root.setting("notificationSound", "On") !== false
+  readonly property bool alertsEnabled: notificationsEnabled || notificationSoundEnabled
+  readonly property bool notificationUpdatePending: notificationUpdater.running
+  property string notificationTarget: "On"
+
+  function toggleNotifications() {
+    if (notificationUpdater.running) return
+    root.notificationTarget = root.alertsEnabled ? "Off" : "On"
+    notificationUpdater.running = true
+  }
+
+  // Use the host CLI so settings persist and reload on every monitor. The
+  // fixed shell program accepts only the internally selected On/Off argument.
+  Process {
+    id: notificationUpdater
+    command: ["sh", "-c",
+      'omarchy bar set io.github.ricky.whatsapp notifications "$1" && '
+        + 'omarchy bar set io.github.ricky.whatsapp notificationSound "$1"',
+      "whatsapp-notifications", root.notificationTarget]
+    onExited: function (exitCode, exitStatus) {
+      if (exitCode !== 0 || exitStatus !== 0)
+        root.statusLine = "Could not update notification settings"
+    }
+  }
   property bool pinToLatest: true
   property bool logoutConfirmOpen: false
   property bool refreshing: false
@@ -569,6 +596,17 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
+
+            PanelActionButton {
+              objectName: "notificationBell"
+              iconText: root.alertsEnabled ? "\uf0f3" : "\uf1f6"
+              tooltipText: root.alertsEnabled ? "Mute notifications and sound" : "Enable notifications and sound"
+              enabled: !root.notificationUpdatePending
+              focusable: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.toggleNotifications()
+            }
 
             PanelActionButton {
               visible: !root.showLogin

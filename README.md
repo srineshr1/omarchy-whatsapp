@@ -83,6 +83,7 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 | Reorder pinned chats (this panel only) | `Shift+↑` / `Shift+↓`, or `Shift+K` / `Shift+J` |
 | Add the chat to / remove it from your lists | `l`, then `Enter` to toggle, `Escape` when done |
 | Refresh chats | Refresh button, or `r` |
+| Mute or enable desktop notifications and sound | Bell button in the panel header |
 | Open a chat | `Enter` |
 | Reply | Type, then `Enter` |
 | Back to the chat list | `Escape` |
@@ -143,11 +144,32 @@ and hot-reload on save:
 | `socketPath` | `""` | Daemon socket; blank uses `$XDG_RUNTIME_DIR/omarchy-whatsapp.sock` |
 | `autostartDaemon` | `true` | Start the daemon if the socket is missing |
 | `showUnreadCount` | `true` | Show the count next to the icon |
+| `notifications` | `"On"` | Desktop popups (`"Off"` disables them) |
+| `notificationSound` | `"On"` | Alert sound (`"Off"` silences it) |
 | `hideWhenEmpty` | `false` | Hide the widget entirely when nothing is unread |
 | `chatLimit` | `40` | Chats listed in the panel |
 | `messageLimit` | `60` | Messages loaded per conversation |
 | `webAppUrl` | `https://web.whatsapp.com` | Full client URL |
 | `webAppPattern` | `web.whatsapp.com` | Window pattern used to focus the full client |
+
+The panel header has a bell: click it to silence both popups and alert sound;
+click the slashed bell to enable both again. Changes persist in `shell.json`
+and apply to every monitor without restarting. The bell stays enabled when
+either channel is on. It does not change messages, unread counts, or the full
+WhatsApp Web client's notification settings.
+
+For independent control (for example, popups without sound):
+
+```sh
+omarchy bar set io.github.ricky.whatsapp notifications On
+omarchy bar set io.github.ricky.whatsapp notificationSound Off
+```
+
+The daemon reads these settings before delivering an alert. After upgrading to
+this version, restart the daemon once (`omarchy-whatsapp restart`) to load the
+new behavior. Existing `OMARCHY_WHATSAPP_NO_NOTIFY=1` (all alerts) and
+`OMARCHY_WHATSAPP_NO_SOUND=1` (sound only) environment overrides still apply;
+chat mutes and archive preferences continue to suppress both channels.
 
 Move the widget:
 
