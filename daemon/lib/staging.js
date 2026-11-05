@@ -15,6 +15,19 @@ import { MAX_UPLOAD_BYTES } from './outgoing.js'
 export const STALE_STAGE_MS = 60 * 60 * 1000
 
 let staged = 0
+const activeStaged = new Map()
+
+// The daemon's sweeper must not remove a file while WhatsApp still reads it.
+// Reference counts also cover overlapping requests for the same staged file.
+export function retainStaged(path) {
+  const target = resolve(path)
+  activeStaged.set(target, (activeStaged.get(target) || 0) + 1)
+  return () => {
+    const remaining = activeStaged.get(target) - 1
+    if (remaining > 0) activeStaged.set(target, remaining)
+    else activeStaged.delete(target)
+  }
+}
 
 export function stageOutgoing(source, wanted, options = {}) {
   // The name is what the copy on disk is called, so it is a name and never a
@@ -101,6 +114,8 @@ export function sweepStaged(olderThanMs = STALE_STAGE_MS) {
   for (const entry of entries) {
     const target = join(root, entry.name)
     try {
+      const normalized = resolve(target)
+      if ([...activeStaged.keys()].some((path) => path === normalized || dirname(path) === normalized)) continue
       const info = statSync(target)
       if (now - info.mtimeMs < olderThanMs) continue
       if (entry.isDirectory()) {

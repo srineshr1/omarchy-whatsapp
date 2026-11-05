@@ -1,5 +1,5 @@
 import { mediaMessageFor, prepareUpload } from './outgoing.js'
-import { discardStaged } from './staging.js'
+import { discardStaged, retainStaged } from './staging.js'
 import { logger } from './logger.js'
 
 // One file, one WhatsApp message.
@@ -25,6 +25,7 @@ export async function handleSendMedia(payload, reply, deps) {
 
   const routingJid = store.routingJid(rawJid) || rawJid
 
+  const releaseStaged = retainStaged(upload.path)
   let sent
   try {
     // The upload has a deadline of its own: WhatsApp does not let a request
@@ -41,6 +42,10 @@ export async function handleSendMedia(payload, reply, deps) {
     reply({ t: 'error', for: 'sendMedia', id, message: err?.message || 'the message was not sent' })
     deps.reconnect?.()
     return
+  } finally {
+    // No asynchronous work follows the upload; cleanup cannot interleave
+    // with the synchronous delivery/acknowledgement below.
+    releaseStaged()
   }
 
   // Nothing went out: the panel is told so, because it would otherwise clear

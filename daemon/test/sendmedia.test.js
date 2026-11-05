@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import net from 'node:net'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 // The media cache of the tests is a temporary directory: the tests do not
 // write in the cache of the user.
@@ -12,7 +12,7 @@ process.env.OMARCHY_WHATSAPP_MEDIA = mediaHome
 
 const { Bus } = await import('../lib/server.js')
 const { handleSendMedia } = await import('../lib/send.js')
-const { discardStaged, stageOutgoing } = await import('../lib/staging.js')
+const { discardStaged, stageOutgoing, sweepStaged, STALE_STAGE_MS } = await import('../lib/staging.js')
 
 // The daemon is one process and the panel is another, and the only thing
 // between them is a newline-delimited JSON frame on a unix socket. So the
@@ -412,3 +412,66 @@ test('a delivery failure keeps the staged copy available with an error reply', a
     discardStaged(staged)
   }
 })
+
+
+for (const [outcome, copies] of [['ack', 1], ['error', 1], ['error', 2]]) {
+  test(`stale sweep preserves ${copies} active upload(s) until ${outcome}`, async () => {
+    const staged = stageOutgoing(tempFile('slow.png'))
+    const old = new Date(Date.now() - STALE_STAGE_MS * 2)
+    utimesSync(dirname(staged), old, old)
+    const pending = []
+    let started
+    const ready = new Promise((resolve) => { started = resolve })
+    let delivered = 0
+    let reconnected = 0
+    const clients = []
+    try {
+      await withBus(
+        (payload, reply) => handleSendMedia(payload, reply, {
+          sock: { sendMessage() {
+            const result = new Promise((resolve, reject) => pending.push({ resolve, reject }))
+            if (pending.length === copies) started()
+            return result
+          } },
+          connection: 'open',
+          store: { routingJid: (jid) => jid },
+          deliver: () => { delivered += 1 },
+          reconnect: () => { reconnected += 1 }
+        }),
+        async (socketPath) => {
+          const answers = []
+          for (let i = 0; i < copies; i += 1) {
+            const socket = await connect(socketPath)
+            clients.push(socket)
+            answers.push(readFrame(socket))
+            socket.write(JSON.stringify({ t: 'sendMedia', id: 'slow-' + i, jid: '123@s.whatsapp.net', path: staged }) + '\n')
+          }
+          await ready
+          assert.equal(sweepStaged(), 0)
+          assert.equal(existsSync(staged), true)
+          for (let i = 0; i < copies; i += 1) {
+            if (outcome === 'ack') pending[i].resolve({ key: { id: 'sent' } })
+            else pending[i].reject(new Error('upload failed'))
+            assert.deepEqual(await answers[i], outcome === 'ack'
+              ? { t: 'ack', id: 'slow-' + i, ok: true, jid: '123@s.whatsapp.net' }
+              : { t: 'error', for: 'sendMedia', id: 'slow-' + i, message: 'upload failed' })
+            if (i + 1 < copies) {
+              assert.equal(sweepStaged(), 0)
+              assert.equal(existsSync(staged), true)
+            }
+          }
+          assert.equal(pending.length, copies)
+          assert.equal(delivered, outcome === 'ack' ? 1 : 0)
+          assert.equal(reconnected, outcome === 'error' ? copies : 0)
+          assert.equal(existsSync(staged), outcome === 'error')
+          assert.equal(sweepStaged(), outcome === 'error' ? 1 : 0)
+          assert.equal(existsSync(staged), false)
+        }
+      )
+    } finally {
+      for (const request of pending) request.resolve({ key: { id: 'cleanup' } })
+      for (const socket of clients) socket.destroy()
+      discardStaged(staged)
+    }
+  })
+}
