@@ -1,6 +1,7 @@
 import { chmodSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import makeWASocket, {
   Browsers,
   DisconnectReason,
@@ -28,6 +29,7 @@ import {
   shouldNotifyChat
 } from './lib/preferences.js'
 import { watchPluginState as observePluginState } from './lib/plugin-state.js'
+import { isDaemonProcess } from './lib/pid.js'
 
 const RECONNECT_BASE_MS = 2000
 const RECONNECT_MAX_MS = 60000
@@ -1442,13 +1444,17 @@ function claimPid() {
   try {
     const old = Number(readFileSync(pidFile, 'utf8'))
     if (old && old !== process.pid) {
-      try {
-        process.kill(old, 0)
+      // After a reboot the old pid may have been reused by an unrelated process.
+      if (isDaemonProcess(old, fileURLToPath(import.meta.url))) {
         logger.warn({ pid: old }, 'startup: stopping leftover daemon that would fight this session')
-        process.kill(old, 'SIGTERM')
-        displaced = true
-      } catch {
-        // Already gone.
+        try {
+          process.kill(old, 'SIGTERM')
+          displaced = true
+        } catch {
+          // Already gone.
+        }
+      } else {
+        logger.debug({ pid: old }, 'startup: ignoring stale pid file, that pid is not a WhatsApp daemon')
       }
     }
   } catch {
