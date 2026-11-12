@@ -58,10 +58,13 @@ Item {
 
   signal messagesLoaded(string jid, var chat, var messages)
   signal messageArrived(string jid, var message, var chat)
+  signal messageReaction(string jid, var message)
   signal messageStatusChanged(string jid, string messageId, int status)
-  signal messageMedia(string jid, string messageId, string imagePath)
+  signal messageMedia(string jid, string messageId, string mediaPath, string mediaKind)
+  signal mediaFailed(string jid, string messageId, string mediaKind, string reason)
   signal focusRequested(string jid)
   signal commandFailed(string command, string message)
+  signal mediaSendCompleted(string jid)
   signal pairCodeReceived(string code)
   signal sendAcknowledged(string jid)
 
@@ -134,6 +137,26 @@ Item {
     var payload = { t: "send", jid: jid, text: text }
     if (quotedId) payload.quoted = quotedId
     return request(payload)
+  }
+
+  function sendVoiceNote(jid, path) {
+    if (!jid || !path || !path.length) return false
+    return request({ t: "sendVoiceNote", jid: jid, path: path })
+  }
+
+  function sendFile(jid, path) {
+    if (!jid || !path || !path.length) return false
+    return request({ t: "sendFile", jid: jid, path: path })
+  }
+
+  function downloadMedia(jid, messageId) {
+    if (!jid || !messageId) return false
+    return request({ t: "downloadMedia", jid: jid, id: messageId })
+  }
+
+  function react(jid, messageId, emoji) {
+    if (!jid || !messageId || !emoji) return false
+    return request({ t: "react", jid: jid, id: messageId, emoji: emoji })
   }
 
   property bool setupTried: false
@@ -240,8 +263,20 @@ Item {
         root.messageStatusChanged(frame.jid || "", frame.id || "", frame.status || 0)
         break
 
+      case "messageReaction":
+        root.messageReaction(frame.jid || "", frame.message || null)
+        break
+
+      case "sent":
+        if (frame.jid) root.mediaSendCompleted(frame.jid)
+        break
+
       case "messageMedia":
-        root.messageMedia(frame.jid || "", frame.id || "", frame.imagePath || "")
+        root.messageMedia(frame.jid || "", frame.id || "", frame.path || frame.imagePath || "", frame.kind || "image")
+        break
+
+      case "mediaFailed":
+        root.mediaFailed(frame.jid || "", frame.id || "", frame.kind || "image", frame.reason || "")
         break
 
       case "focus":

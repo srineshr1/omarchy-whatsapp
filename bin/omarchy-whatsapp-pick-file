@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+
+dialog = Gtk.FileChooserDialog(
+    title="Attach file to WhatsApp",
+    action=Gtk.FileChooserAction.OPEN,
+    buttons=("Cancel", Gtk.ResponseType.CANCEL, "Attach", Gtk.ResponseType.ACCEPT),
+)
+dialog.set_modal(True)
+dialog.set_select_multiple(False)
+
+response = dialog.run()
+if response == Gtk.ResponseType.ACCEPT:
+    print(dialog.get_filename())
+dialog.destroy()

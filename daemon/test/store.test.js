@@ -160,3 +160,27 @@ test('does not retry incoming or non-text messages without original content', ()
   assert.equal(store.retryMessage({ remoteJid: jid, id: 'incoming' }), undefined)
   assert.equal(store.retryMessage({ remoteJid: jid, id: 'photo' }), undefined)
 })
+
+test('attaches, replaces, and removes message reactions by sender', () => {
+  const store = new Store()
+  store.upsertMessage('555@s.whatsapp.net', {
+    id: 'message-1',
+    key: { remoteJid: '555@s.whatsapp.net', id: 'message-1' },
+    text: 'hello'
+  })
+
+  store.applyReaction('555@s.whatsapp.net', 'message-1', {
+    emoji: '👍', senderJid: '111@s.whatsapp.net', fromMe: false
+  })
+  store.applyReaction('555@s.whatsapp.net', 'message-1', {
+    emoji: '❤️', senderJid: '111@s.whatsapp.net', fromMe: false
+  })
+  assert.deepEqual(store.findMessage('555@s.whatsapp.net', 'message-1').reactions, [{
+    emoji: '❤️', senderJid: '111@s.whatsapp.net', senderName: '', fromMe: false
+  }])
+
+  store.applyReaction('555@s.whatsapp.net', 'message-1', {
+    emoji: '', senderJid: '111@s.whatsapp.net', fromMe: false
+  })
+  assert.deepEqual(store.findMessage('555@s.whatsapp.net', 'message-1').reactions, [])
+})

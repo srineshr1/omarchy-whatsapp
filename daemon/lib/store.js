@@ -108,7 +108,9 @@ export class Store {
       this.me = data.me || null
       for (const list of this.messages.values()) {
         for (const message of list) {
-          if (message.imagePath && !existsSync(message.imagePath)) message.imagePath = ''
+          for (const field of ['imagePath', 'audioPath', 'videoPath', 'videoThumbPath']) {
+            if (message[field] && !existsSync(message[field])) message[field] = ''
+          }
         }
       }
       for (const [from, to] of this.aliases.entries()) {
@@ -603,6 +605,26 @@ export class Store {
       return { extendedTextMessage: { text: message.text } }
     }
     return undefined
+  }
+
+  applyReaction(jid, messageId, reaction) {
+    const target = this.findMessage(jid, messageId)
+    if (!target || !reaction?.senderJid) return null
+
+    const senderJid = normalizeJid(reaction.senderJid)
+    const previous = Array.isArray(target.reactions) ? target.reactions : []
+    const next = previous.filter((entry) => normalizeJid(entry?.senderJid) !== senderJid)
+    if (reaction.emoji) {
+      next.push({
+        emoji: reaction.emoji,
+        senderJid,
+        senderName: reaction.senderName || '',
+        fromMe: reaction.fromMe === true
+      })
+    }
+    target.reactions = next
+    this.markDirty()
+    return target
   }
 
   clear() {

@@ -62,8 +62,14 @@ function sameDay(a, b) {
   return startOfDay(new Date(a * 1000)) === startOfDay(new Date(b * 1000))
 }
 
-function isPhotoPlaceholder(text) {
-  return /^[\uf03e\uf118]?\s*(Photo|Sticker)?$/i.test(String(text || "").trim())
+function formatDuration(ms) {
+  var total = Math.max(0, Math.floor((ms || 0) / 1000))
+  var seconds = total % 60
+  return Math.floor(total / 60) + ":" + (seconds < 10 ? "0" : "") + seconds
+}
+
+function isMediaPlaceholder(text) {
+  return /^[\uf03e\uf118\uf03d]?\s*(Photo|Sticker|Video|Video note)?$/i.test(String(text || "").trim())
 }
 
 function chatTitle(chat) {
@@ -110,6 +116,25 @@ function statusGlyph(status) {
 
 function statusIsRead(status) {
   return (status | 0) >= 4
+}
+
+function reactionGroups(reactions) {
+  var groups = []
+  var list = reactions || []
+  for (var i = 0; i < list.length; i++) {
+    var emoji = String(list[i] && list[i].emoji || "")
+    if (!emoji) continue
+    var existing = null
+    for (var j = 0; j < groups.length; j++) {
+      if (groups[j].emoji === emoji) {
+        existing = groups[j]
+        break
+      }
+    }
+    if (existing) existing.count++
+    else groups.push({ emoji: emoji, count: 1 })
+  }
+  return groups
 }
 
 function connectionLabel(state, needsLogin, daemonOnline, pairingStopped) {
@@ -233,6 +258,5 @@ function formatMessageText(text, linkColor) {
 
   return docPrefix + result
 }
-
 
 

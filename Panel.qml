@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtMultimedia
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Io
@@ -39,7 +40,10 @@ Panel {
   property string listPickerJid: ""
   property int listPickerIndex: 0
   readonly property var customLists: root.client ? (root.client.lists || []) : []
-  readonly property bool peekActive: peekImagePath.length > 0
+  property string peekVideoPath: ""
+  // A video the user pressed play on while it was still downloading.
+  property string pendingVideoId: ""
+  readonly property bool peekActive: peekImagePath.length > 0 || peekVideoPath.length > 0
 
   readonly property var chats: client ? client.chats : []
   readonly property bool daemonOnline: client ? client.daemonOnline : false
@@ -56,6 +60,42 @@ Panel {
   readonly property color secondaryForeground: Qt.darker(root.foreground, 1.5)
   readonly property int chatLimit: root.setting("chatLimit", 40)
   readonly property int messageLimit: root.setting("messageLimit", 60)
+  property bool sendRecordedAudio: false
+  property string reactionTargetId: ""
+  property real reactionMenuX: 0
+  property real reactionMenuY: 0
+
+  Timer {
+    id: reactionDismissTimer
+    interval: 500
+    onTriggered: root.reactionTargetId = ""
+  }
+
+  MediaPlayer {
+    id: voicePlayer
+    audioOutput: AudioOutput { volume: 1.0 }
+  }
+
+  CaptureSession {
+    audioInput: AudioInput { }
+    recorder: voiceRecorder
+  }
+
+  MediaRecorder {
+    id: voiceRecorder
+    mediaFormat.fileFormat: MediaFormat.Ogg
+    mediaFormat.audioCodec: MediaFormat.AudioCodec.Opus
+    audioBitRate: 64000
+    onRecorderStateChanged: {
+      if (recorderState !== MediaRecorder.StoppedState || !root.sendRecordedAudio) return
+      root.sendRecordedAudio = false
+      if (actualLocation && String(actualLocation).length > 0) root.sendVoiceNote(actualLocation)
+    }
+    onErrorOccurred: function (error, errorString) {
+      root.sendRecordedAudio = false
+      root.statusLine = errorString || "Microphone recording failed"
+    }
+  }
 
   function open() { root.controller.show() }
   function close() { root.controller.hide() }
@@ -259,6 +299,70 @@ Panel {
     }
   }
 
+  function localPath(url) {
+    var text = String(url || "")
+    if (text.indexOf("file://") !== 0) return ""
+    return decodeURIComponent(text.substring(7))
+  }
+
+  function sendVoiceNote(url) {
+    var path = root.localPath(url)
+    if (!path || !root.client || !root.client.ready || !root.activeJid) {
+      root.statusLine = "Cannot send voice note while disconnected"
+      return
+    }
+    root.statusLine = "Sending voice note…"
+    if (!root.client.sendVoiceNote(root.activeJid, path)) root.statusLine = "Could not send voice note"
+  }
+
+  function sendFile(path) {
+    var local = root.localPath(path) || String(path || "")
+    if (!local.startsWith("/") || !root.client || !root.client.ready || !root.activeJid) {
+      root.statusLine = "Cannot attach file while disconnected"
+      return
+    }
+    root.statusLine = "Sending file…"
+    if (!root.client.sendFile(root.activeJid, local)) root.statusLine = "Could not attach file"
+  }
+
+  function closePeek() {
+    root.peekImagePath = ""
+    root.peekVideoPath = ""
+  }
+
+  function playVideo(message) {
+    if (!message) return
+    if (message.videoPath) {
+      root.peekVideoPath = message.videoPath
+      return
+    }
+    if (!root.client || !root.client.downloadMedia(root.activeJid, message.id)) {
+      root.statusLine = "Cannot download video while disconnected"
+      return
+    }
+    root.pendingVideoId = message.id
+    root.statusLine = "Downloading video…"
+  }
+
+  function toggleRecording() {
+    if (voiceRecorder.recorderState === MediaRecorder.RecordingState) {
+      root.statusLine = "Sending voice note…"
+      root.sendRecordedAudio = true
+      voiceRecorder.stop()
+      return
+    }
+    var runtime = Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
+    voiceRecorder.outputLocation = Qt.resolvedUrl("file://" + runtime + "/omarchy-whatsapp-" + Date.now() + ".ogg")
+    root.statusLine = "Recording… click the stop button to send"
+    voiceRecorder.record()
+  }
+
+  function sendReaction(messageId, emoji) {
+    if (!root.client || !root.client.ready || !root.activeJid) return
+    if (!root.client.react(root.activeJid, messageId, emoji)) root.statusLine = "Could not send reaction"
+    root.reactionTargetId = ""
+  }
+
   function openWebClient() {
     webLauncher.running = true
   }
@@ -366,19 +470,48 @@ Panel {
       if (root.opened && root.client && root.client.ready) root.client.markRead(jid)
     }
 
+    function onMessageReaction(jid, message) {
+      if (jid !== root.activeJid || !message) return
+      root.patchMessage(message.id, { reactions: message.reactions || [] })
+    }
+
+    function onMediaSendCompleted(jid) {
+      if (jid === root.activeJid && (root.statusLine === "Sending file…" || root.statusLine === "Sending voice note…"))
+        root.statusLine = ""
+    }
+
     function onMessageStatusChanged(jid, messageId, status) {
       // Receipt JIDs are often a LID or device-suffixed form that does not
       // equal activeJid. Apply by message id in the open thread.
       root.patchMessage(messageId, { status: status })
     }
 
-    function onMessageMedia(jid, messageId, imagePath) {
-      if (jid !== root.activeJid || !imagePath) return
-      root.patchMessage(messageId, { imagePath: imagePath })
+    function onMessageMedia(jid, messageId, mediaPath, mediaKind) {
+      if (jid !== root.activeJid || !mediaPath) return
+      var field = mediaKind === "audio" ? "audioPath" : mediaKind === "video" ? "videoPath" : "imagePath"
+      var fields = {}
+      fields[field] = mediaPath
+      root.patchMessage(messageId, fields)
+      if (mediaKind === "video" && messageId === root.pendingVideoId) {
+        root.pendingVideoId = ""
+        if (root.statusLine === "Downloading video…") root.statusLine = ""
+        root.peekVideoPath = mediaPath
+      }
+    }
+
+    function onMediaFailed(jid, messageId, mediaKind, reason) {
+      if (messageId !== root.pendingVideoId) return
+      root.pendingVideoId = ""
+      root.statusLine = "Could not play video: " + reason
     }
 
     function onCommandFailed(command, message) {
       if (command === "send" || command === "listMember") root.statusLine = message
+      if (command === "sendFile" || command === "sendVoiceNote") root.statusLine = message
+      if (command === "downloadMedia") {
+        root.pendingVideoId = ""
+        root.statusLine = message
+      }
       if (command === "refresh") {
         root.refreshing = false
         refreshWatchdog.stop()
@@ -439,7 +572,9 @@ Panel {
     owner: root.hostWidget || root
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
+    // KeyboardPanel gives this target focus after it has finished opening.
+    // A conversation should be ready to type into immediately.
+    focusTarget: root.view === "chat" ? composer : keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
@@ -450,7 +585,7 @@ Panel {
       blocked: composer.activeFocus || root.logoutConfirmOpen || root.peekActive || root.listPickerOpen
 
       onCloseRequested: {
-        if (root.peekActive) root.peekImagePath = ""
+        if (root.peekActive) root.closePeek()
         else if (root.logoutConfirmOpen) root.cancelLogout()
         else if (root.view === "chat") root.back()
         else root.close()
@@ -929,12 +1064,15 @@ Panel {
                 // width depend on content that depends on the bubble: a binding
                 // loop, which collapses every bubble to a few pixels.
                 readonly property real maxInner: Math.max(Style.space(60), bubbleRow.width * 0.82 - bubbleRow.pad * 2)
-                readonly property bool hasImage: messageRow.modelData.imagePath
+                readonly property bool hasImage: !!messageRow.modelData.imagePath
                   && String(messageRow.modelData.imagePath).length > 0
+                readonly property bool hasAudio: !!messageRow.modelData.audioPath
+                  && String(messageRow.modelData.audioPath).length > 0
+                readonly property bool hasVideo: messageRow.modelData.mediaKind === "video"
                 readonly property bool showBody: {
                   var text = messageRow.modelData.text || ""
                   if (!text.length) return false
-                  if (bubbleRow.hasImage && Model.isPhotoPlaceholder(text)) return false
+                  if ((bubbleRow.hasImage || bubbleRow.hasVideo) && Model.isMediaPlaceholder(text)) return false
                   return true
                 }
                 readonly property bool showSender: !messageRow.modelData.fromMe
@@ -960,6 +1098,9 @@ Panel {
                     width: Math.max(
                       bubbleRow.showSender ? senderLabel.width : 0,
                       bubbleRow.hasImage ? photo.width : 0,
+                      bubbleRow.hasVideo ? videoTile.width : 0,
+                      bubbleRow.hasAudio ? audioControl.width : 0,
+                      reactionsRow.visible ? reactionsRow.implicitWidth : 0,
                       bodyLabel.visible ? bodyLabel.width : 0,
                       Math.min(metaLabel.implicitWidth, bubbleRow.maxInner))
 
@@ -1013,6 +1154,87 @@ Panel {
                       }
                     }
 
+                    Rectangle {
+                      id: videoTile
+                      readonly property bool loading: root.pendingVideoId === messageRow.modelData.id
+                      visible: bubbleRow.hasVideo
+                      width: Math.min(bubbleRow.maxInner, Style.space(220))
+                      height: videoPoster.status === Image.Ready && videoPoster.sourceSize.width > 0
+                        ? Math.min(Style.space(200), videoPoster.sourceSize.height * (width / videoPoster.sourceSize.width))
+                        : width * 9 / 16
+                      radius: Style.cornerRadius > 0 ? Style.cornerRadius : Style.space(4)
+                      color: "#40000000"
+                      clip: true
+
+                      Image {
+                        id: videoPoster
+                        anchors.fill: parent
+                        fillMode: Image.PreserveAspectCrop
+                        asynchronous: true
+                        cache: true
+                        source: messageRow.modelData.videoThumbPath
+                          ? Qt.resolvedUrl("file://" + messageRow.modelData.videoThumbPath)
+                          : ""
+                      }
+
+                      Rectangle {
+                        anchors.centerIn: parent
+                        width: Style.space(40)
+                        height: width
+                        radius: width / 2
+                        color: videoMouse.containsMouse ? "#c0000000" : "#90000000"
+
+                        Text {
+                          anchors.centerIn: parent
+                          // Play glyph sits optically left of centre in most Nerd Fonts.
+                          anchors.horizontalCenterOffset: videoTile.loading ? 0 : Style.space(2)
+                          text: videoTile.loading ? "\uf110" : "\uf04b"
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.title
+                          color: "#ffffff"
+                        }
+                      }
+
+                      MouseArea {
+                        id: videoMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.playVideo(messageRow.modelData)
+                      }
+                    }
+
+                    Row {
+                      id: audioControl
+                      visible: bubbleRow.hasAudio
+                      spacing: Style.space(5)
+
+                      PanelActionButton {
+                        iconText: voicePlayer.playbackState === MediaPlayer.PlayingState
+                          && voicePlayer.source.toString() === Qt.resolvedUrl("file://" + messageRow.modelData.audioPath).toString()
+                          ? "\uf04c" : "\uf04b"
+                        tooltipText: "Play audio"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: {
+                          var source = Qt.resolvedUrl("file://" + messageRow.modelData.audioPath)
+                          if (voicePlayer.playbackState === MediaPlayer.PlayingState && voicePlayer.source.toString() === source.toString()) voicePlayer.stop()
+                          else {
+                            voicePlayer.source = source
+                            voicePlayer.play()
+                          }
+                        }
+                      }
+
+                      Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Audio"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                      }
+                    }
+
                     Text {
                       id: bodyLabel
                       visible: bubbleRow.showBody
@@ -1053,6 +1275,118 @@ Panel {
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                     }
+
+                    Row {
+                      id: reactionsRow
+                      visible: (messageRow.modelData.reactions || []).length > 0
+                      spacing: Style.space(3)
+
+                      Repeater {
+                        model: Model.reactionGroups(messageRow.modelData.reactions || [])
+                        delegate: Rectangle {
+                          required property var modelData
+                          width: reactionLabel.implicitWidth + Style.space(10)
+                          height: Style.space(22)
+                          radius: height / 2
+                          color: Style.normalFillFor(root.foreground, Color.accent)
+                          border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.28)
+                          border.width: 1
+
+                          Text {
+                            id: reactionLabel
+                            anchors.centerIn: parent
+                            text: modelData.emoji + (modelData.count > 1 ? " " + modelData.count : "")
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+                      }
+                    }
+                  }
+
+                }
+
+                HoverHandler {
+                  id: bubbleHover
+                  onHoveredChanged: {
+                    if (hovered) reactionDismissTimer.stop()
+                    else reactionDismissTimer.restart()
+                  }
+                }
+
+                Rectangle {
+                  id: reactionButton
+                  visible: bubbleHover.hovered || reactionButtonMouse.containsMouse
+                    || root.reactionTargetId === messageRow.modelData.id
+                  width: Math.max(Style.space(22), Style.font.icon + Style.spacing.sm * 2)
+                  height: width
+                  x: Math.min(bubble.x + bubble.width + Style.space(2), bubbleRow.width - width)
+                  y: bubble.y + (bubble.height - height) / 2
+                  radius: Style.cornerRadius
+                  color: reactionButtonMouse.containsMouse
+                    ? Style.hoverFillFor(root.secondaryForeground, root.secondaryForeground)
+                    : "transparent"
+
+                  Text {
+                    anchors.centerIn: parent
+                    text: "\uf118"
+                    color: reactionButtonMouse.containsMouse ? root.foreground : root.secondaryForeground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.icon
+                  }
+
+                  MouseArea {
+                    id: reactionButtonMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onContainsMouseChanged: {
+                      if (containsMouse) reactionDismissTimer.stop()
+                      else if (!bubbleHover.hovered && !reactionPaletteHover.containsMouse) reactionDismissTimer.restart()
+                    }
+                    onClicked: {
+                      root.reactionTargetId = root.reactionTargetId === messageRow.modelData.id ? "" : messageRow.modelData.id
+                      reactionDismissTimer.stop()
+                    }
+                  }
+                }
+
+                Item {
+                  id: reactionPalette
+                  visible: root.reactionTargetId === messageRow.modelData.id
+                  z: 10
+                  width: reactionEmojiRow.implicitWidth
+                  height: reactionEmojiRow.implicitHeight
+                  x: Math.max(0, Math.min(reactionButton.x + reactionButton.width / 2 - width / 2, bubbleRow.width - width))
+                  y: reactionButton.y - height - Style.space(3)
+
+                  MouseArea {
+                    id: reactionPaletteHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.NoButton
+                    onContainsMouseChanged: {
+                      if (containsMouse) reactionDismissTimer.stop()
+                      else if (!bubbleHover.hovered && !reactionButtonMouse.containsMouse) reactionDismissTimer.restart()
+                    }
+                  }
+
+                  Row {
+                    id: reactionEmojiRow
+                    spacing: Style.space(2)
+
+                    Repeater {
+                      model: ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+                      delegate: PanelActionButton {
+                        required property string modelData
+                        iconText: modelData
+                        tooltipText: "React " + modelData
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: root.sendReaction(messageRow.modelData.id, modelData)
+                      }
+                    }
                   }
                 }
               }
@@ -1071,12 +1405,25 @@ Panel {
           // ── Inline reply ───────────────────────────────────────────────
           Item {
             width: parent.width
-            implicitHeight: Math.max(composer.implicitHeight, sendButton.implicitHeight)
+            implicitHeight: Math.max(composer.implicitHeight, attachButton.implicitHeight, microphoneButton.implicitHeight)
+
+            PanelActionButton {
+              id: attachButton
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\uf0c6"
+              tooltipText: "Attach file"
+              enabled: root.linked
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: if (!filePicker.running) filePicker.running = true
+            }
 
             TextField {
               id: composer
-              anchors.left: parent.left
-              anchors.right: sendButton.left
+              anchors.left: attachButton.right
+              anchors.leftMargin: Style.space(6)
+              anchors.right: microphoneButton.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
               foreground: root.foreground
@@ -1097,17 +1444,28 @@ Panel {
             }
 
             PanelActionButton {
-              id: sendButton
+              id: microphoneButton
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              iconText: "\uf1d8"
-              tooltipText: "Send"
-              enabled: root.linked && composer.text.trim().length > 0
+              iconText: voiceRecorder.recorderState === MediaRecorder.RecordingState ? "\uf04d" : "\uf130"
+              tooltipText: voiceRecorder.recorderState === MediaRecorder.RecordingState ? "Stop and send voice note" : "Record voice note"
+              enabled: root.linked
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onClicked: root.sendReply()
+              onClicked: root.toggleRecording()
             }
           }
+
+          Process {
+            id: filePicker
+            command: [root.pluginDir + "/bin/omarchy-whatsapp-pick-file"]
+            stdout: StdioCollector { id: filePickerOutput; waitForEnd: true }
+            onExited: function(exitCode) {
+              var path = String(filePickerOutput.text || "").trim()
+              if (exitCode === 0 && path.length > 0) root.sendFile(path)
+            }
+          }
+
         }
       }
 
@@ -1249,7 +1607,7 @@ Panel {
 
       MouseArea {
         anchors.fill: parent
-        onClicked: root.peekImagePath = ""
+        onClicked: root.closePeek()
       }
     }
 
@@ -1259,7 +1617,22 @@ Panel {
       focus: root.peekActive
 
       Keys.onEscapePressed: function (event) {
-        root.peekImagePath = ""
+        root.closePeek()
+        event.accepted = true
+      }
+      Keys.onSpacePressed: function (event) {
+        if (!peekVideo.visible) return
+        peekVideo.togglePlayback()
+        event.accepted = true
+      }
+      Keys.onLeftPressed: function (event) {
+        if (!peekVideo.visible) return
+        peekVideo.seek(Math.max(0, peekVideo.position - 5000))
+        event.accepted = true
+      }
+      Keys.onRightPressed: function (event) {
+        if (!peekVideo.visible) return
+        peekVideo.seek(Math.min(peekVideo.duration, peekVideo.position + 5000))
         event.accepted = true
       }
 
@@ -1270,16 +1643,93 @@ Panel {
 
         Image {
           id: peekImage
+          visible: root.peekImagePath.length > 0
           anchors.centerIn: parent
           width: Math.min(parent.width, sourceSize.width > 0 ? sourceSize.width : parent.width)
           height: Math.min(parent.height, sourceSize.height > 0 ? sourceSize.height : parent.height)
           fillMode: Image.PreserveAspectFit
           asynchronous: true
-          source: root.peekActive ? Qt.resolvedUrl("file://" + root.peekImagePath) : ""
+          source: peekImage.visible ? Qt.resolvedUrl("file://" + root.peekImagePath) : ""
 
           MouseArea {
             anchors.fill: parent
             onClicked: function (event) { event.accepted = true }
+          }
+        }
+
+        Video {
+          id: peekVideo
+          visible: root.peekVideoPath.length > 0
+          anchors.fill: parent
+          anchors.bottomMargin: peekProgress.height + Style.space(8)
+          fillMode: VideoOutput.PreserveAspectFit
+          autoPlay: true
+          source: root.peekVideoPath.length > 0 ? Qt.resolvedUrl("file://" + root.peekVideoPath) : ""
+
+          function togglePlayback() {
+            if (playbackState === MediaPlayer.PlayingState) pause()
+            else play()
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            onClicked: peekVideo.togglePlayback()
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: peekVideo.playbackState !== MediaPlayer.PlayingState
+            text: "\uf04b"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title * 2
+            color: "#ffffff"
+          }
+        }
+
+        Item {
+          id: peekProgress
+          visible: peekVideo.visible
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          height: Style.space(20)
+
+          Text {
+            id: peekTime
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: Model.formatDuration(peekVideo.position) + " / " + Model.formatDuration(peekVideo.duration)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: "#ffffff"
+          }
+
+          Rectangle {
+            id: peekTrack
+            anchors.left: parent.left
+            anchors.right: peekTime.left
+            anchors.rightMargin: Style.space(10)
+            anchors.verticalCenter: parent.verticalCenter
+            height: Style.space(4)
+            radius: height / 2
+            color: "#50ffffff"
+
+            Rectangle {
+              width: peekVideo.duration > 0 ? parent.width * peekVideo.position / peekVideo.duration : 0
+              height: parent.height
+              radius: parent.radius
+              color: root.bar ? root.bar.urgent : Color.accent
+            }
+          }
+
+          MouseArea {
+            anchors.fill: peekTrack
+            anchors.topMargin: -Style.space(8)
+            anchors.bottomMargin: -Style.space(8)
+            cursorShape: Qt.PointingHandCursor
+            onClicked: function (event) {
+              if (peekVideo.duration > 0) peekVideo.seek(peekVideo.duration * event.x / peekTrack.width)
+            }
           }
         }
       }

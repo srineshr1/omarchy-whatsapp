@@ -85,6 +85,9 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 | Refresh chats | Refresh button, or `r` |
 | Open a chat | `Enter` |
 | Reply | Type, then `Enter` |
+| Attach a file | Click the paperclip and choose any file; MP4 videos (up to 100 MB) are sent as video, everything else as a document |
+| Watch a video | Click the thumbnail to download and play it; `Space` pauses, `←`/`→` seek 5 s, `Escape` closes |
+| Send a voice note | Click the microphone to record, then click Stop to send |
 | Back to the chat list | `Escape` |
 | Close the panel | `Escape` from the list |
 | Full WhatsApp Web | Right-click the icon, or the ⧉ button in the panel |
@@ -162,12 +165,14 @@ omarchy bar move io.github.ricky.whatsapp --section right
 | `~/.local/state/omarchy-whatsapp/auth/` | Linked-device credentials and Signal keys (`0700`) |
 | `~/.local/state/omarchy-whatsapp/store.json` | Recent chats and up to 200 messages per chat (`0600`) |
 | `$XDG_RUNTIME_DIR/omarchy-whatsapp.sock` | Control socket (`0600`, cleared on logout) |
+| `~/.cache/omarchy-whatsapp/media/` | Downloaded photos, stickers, audio, video thumbnails, and videos you played (cleared on logout) |
 
-Nothing leaves your machine except traffic to WhatsApp itself. Media is never
-downloaded — photos and voice notes show as `📷 Photo`, `🎤 Voice message`, and
-so on. Open the full client for the real thing.
+Nothing leaves your machine except traffic to WhatsApp itself. Photos, stickers,
+and audio in an open chat are downloaded to the media cache; videos only show
+their inline thumbnail until you press play. Documents show as a label — open
+the full client for those.
 
-`omarchy-whatsapp logout` unlinks the device and deletes all three.
+`omarchy-whatsapp logout` unlinks the device and deletes all of the above.
 
 Disabling the bar widget with `omarchy plugin disable io.github.ricky.whatsapp`
 also stops and disables the WhatsApp user service. Linked-device credentials

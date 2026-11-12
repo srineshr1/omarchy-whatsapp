@@ -70,38 +70,63 @@ function bytesToB64(value) {
   return ''
 }
 
-// Image/sticker payloads we can decrypt later. Video and documents stay labels.
-export function extractImage(message) {
+const MEDIA_KINDS = {
+  imageMessage: { kind: 'image', mimetype: 'image/jpeg' },
+  stickerMessage: { kind: 'sticker', mimetype: 'image/webp' },
+  audioMessage: { kind: 'audio', mimetype: 'audio/ogg' },
+  videoMessage: { kind: 'video', mimetype: 'video/mp4' },
+  ptvMessage: { kind: 'video', mimetype: 'video/mp4' }
+}
+
+// Media payloads that can be decrypted later. Documents stay labels.
+export function extractMedia(message) {
   const content = normalizeMessageContent(message)
   if (!content) return null
   const type = getContentType(content)
-  if (type !== 'imageMessage' && type !== 'stickerMessage') return null
+  const known = MEDIA_KINDS[type]
+  if (!known) return null
   const node = content[type]
   if (!node || typeof node !== 'object') return null
   const mediaKey = bytesToB64(node.mediaKey)
   if (!mediaKey || !(node.directPath || node.url)) return null
   const fileLength = Number(node.fileLength || 0)
   return {
-    kind: type === 'stickerMessage' ? 'sticker' : 'image',
-    mimetype: node.mimetype || (type === 'stickerMessage' ? 'image/webp' : 'image/jpeg'),
+    kind: known.kind,
+    ...(type === 'ptvMessage' ? { ptv: true } : {}),
+    mimetype: node.mimetype || known.mimetype,
     mediaKey,
     directPath: node.directPath || '',
     url: node.url || '',
     fileEncSha256: bytesToB64(node.fileEncSha256),
     fileSha256: bytesToB64(node.fileSha256),
     fileLength,
-    caption: typeof node.caption === 'string' ? node.caption : ''
+    seconds: Number(node.seconds || 0),
+    caption: typeof node.caption === 'string' ? node.caption : '',
+    ...(known.kind === 'video' ? { thumbnail: bytesToB64(node.jpegThumbnail) } : {})
   }
 }
 
-export function isPhotoPlaceholder(text) {
-  return /^[\uf03e\uf118]?\s*(Photo|Sticker)?$/i.test(String(text || '').trim())
+export function isMediaPlaceholder(text) {
+  return /^[\uf03e\uf118\uf03d]?\s*(Photo|Sticker|Video|Video note)?$/i.test(String(text || '').trim())
 }
 
 export function messageType(message) {
   const content = normalizeMessageContent(message)
   if (!content) return ''
   return getContentType(content) || ''
+}
+
+// Reactions arrive as protocol messages whose target is another message in
+// the same chat. They are not standalone messages for the panel to render.
+export function reactionDetails(message) {
+  const rawContent = normalizeMessageContent(message)
+  if (!rawContent) return null
+  const content = unwrapMessage(rawContent) || rawContent
+  if (getContentType(content) !== 'reactionMessage') return null
+  const reaction = content.reactionMessage
+  const key = reaction?.key
+  if (!key?.id) return null
+  return { id: key.id, text: typeof reaction.text === 'string' ? reaction.text : '' }
 }
 
 function unwrapMessage(content) {
