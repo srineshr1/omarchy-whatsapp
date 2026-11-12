@@ -19,8 +19,10 @@ import { Store, normalizeJid, pinRank } from './lib/store.js'
 import { scanAppState } from './lib/appstate.js'
 import { Notifier } from './lib/notify.js'
 import { Bus } from './lib/server.js'
-import { extractImage, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid } from './lib/message.js'
-import { existingMediaPath, MediaCache } from './lib/media.js'
+import { extractMedia, isGroupJid, isIgnorableChat, isPhotoPlaceholder, isSilent, messageText, messageType, prettyJid } from './lib/message.js'
+import { existingMediaPath, MediaCache, publicMessage } from './lib/media.js'
+import { handleSendMedia } from './lib/send.js'
+import { sweepStaged } from './lib/staging.js'
 import {
   applyChatNotificationPreferences,
   isChatMuted,
@@ -322,12 +324,6 @@ function isRecentIncoming(message) {
 
 // Convert a raw Baileys message into the flat shape the panel renders and the
 // store persists.
-function publicMessage(message) {
-  if (!message) return message
-  const { media: _ignored, retryMessage: _retryMessage, ...rest } = message
-  return rest
-}
-
 function asStatus(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   if (value && typeof value.toNumber === 'function') {
@@ -369,13 +365,13 @@ function applyMessageStatus(jid, id, status) {
 
 function flatten(chatJid, message) {
   const ts = toTs(message.messageTimestamp)
-  const image = extractImage(message.message)
+  const media = extractMedia(message.message)
   const id = message.key?.id || `${ts}-${Math.random().toString(36).slice(2, 8)}`
   const flat = {
     id,
     ts,
     fromMe: !!message.key?.fromMe,
-    text: image ? (image.caption || messageText(message.message)) : messageText(message.message),
+    text: media ? (media.caption || messageText(message.message)) : messageText(message.message),
     type: messageType(message.message),
     senderName: senderNameFor(chatJid, message),
     senderJid: message.key?.participant ? jidNormalizedUser(message.key.participant) : '',
@@ -387,9 +383,13 @@ function flatten(chatJid, message) {
       participant: message.key?.participant || undefined
     }
   }
-  if (image) {
-    const { caption, ...payload } = image
+  if (media) {
+    const { caption, ...payload } = media
     flat.media = payload
+    // What the panel needs to know to draw it: a voice note plays, a picture
+    // shows, and the length of a voice note is on the label.
+    flat.mediaKind = payload.kind
+    flat.mediaSeconds = payload.seconds || 0
     flat.imagePath = existingMediaPath({ id, media: payload, imagePath: '' })
   }
   return flat
@@ -1173,6 +1173,28 @@ async function refreshMissingImages(jid, list) {
   }
 }
 
+// A message that left this machine: show it in every panel, and remember it
+// so a retry can find it.
+//
+// generateWAMessage stamps PENDING. relayMessage has already succeeded by the
+// time this runs, so the server has the stanza — show a single tick
+// immediately.
+function deliverOutgoing(routingJid, rawJid, sent) {
+  if (!sent) return
+  if (asStatus(sent.status) < MSG_SERVER_ACK) sent.status = MSG_SERVER_ACK
+  const res = ingest(routingJid, sent)
+  if (!res) return
+  const { message, canonicalTarget } = res
+  if ((message.status || 0) < MSG_SERVER_ACK) {
+    message.status = MSG_SERVER_ACK
+    store.upsertMessage(canonicalTarget, message)
+  }
+  store.rememberRetryMessage(canonicalTarget, message.id, sent.message)
+  bus.broadcast({ t: 'message', jid: rawJid, message: publicMessage(message), chat: store.publicChat(canonicalTarget), unread: store.totalUnread() })
+  applyMessageStatus(canonicalTarget, message.id, MSG_SERVER_ACK)
+  pushChats()
+}
+
 async function handleCommand(payload, reply) {
   const { t, id } = payload
   switch (t) {
@@ -1286,24 +1308,21 @@ async function handleCommand(payload, reply) {
       }
 
       const sent = await sock.sendMessage(routingJid, { text }, options)
-      if (sent) {
-        // generateWAMessage stamps PENDING. relayMessage has already succeeded
-        // here, so the server has the stanza — show a single tick immediately.
-        if (asStatus(sent.status) < MSG_SERVER_ACK) sent.status = MSG_SERVER_ACK
-        const res = ingest(routingJid, sent)
-        if (res) {
-          const { message, canonicalTarget } = res
-          if ((message.status || 0) < MSG_SERVER_ACK) {
-            message.status = MSG_SERVER_ACK
-            store.upsertMessage(canonicalTarget, message)
-          }
-          store.rememberRetryMessage(canonicalTarget, message.id, sent.message)
-          bus.broadcast({ t: 'message', jid: rawJid, message: publicMessage(message), chat: store.publicChat(canonicalTarget), unread: store.totalUnread() })
-          applyMessageStatus(canonicalTarget, message.id, MSG_SERVER_ACK)
-          pushChats()
-        }
-      }
+      deliverOutgoing(routingJid, rawJid, sent)
       reply({ t: 'ack', id, ok: true, jid: rawJid })
+      return
+    }
+
+    case 'sendMedia': {
+      await handleSendMedia(payload, reply, {
+        sock,
+        connection,
+        store,
+        deliver: deliverOutgoing,
+        // An upload that stops moving takes the connection that carried it
+        // with it, so the daemon asks for a new one and is useful again.
+        reconnect: () => scheduleReconnect(0, { reason: 'the upload did not finish', countsAsFailure: false })
+      })
       return
     }
 
@@ -1460,6 +1479,11 @@ function claimPid() {
 
 async function main() {
   ensureDirs()
+  // The copies that were never sent are swept, so the cache does not keep
+  // copies of the user's files for ever.
+  sweepStaged()
+  const stagedSweep = setInterval(() => sweepStaged(), 15 * 60 * 1000)
+  stagedSweep.unref?.()
   startPluginStateWatch()
   if (stopping) return
   if (claimPid()) await sleep(1500)
@@ -1469,8 +1493,14 @@ async function main() {
 
   media.getSocket = () => sock
   media.onReady = (jid, message) => {
+    const path = message.imagePath || ''
+    // The copy the media cache holds may not be the copy the store holds, so
+    // the path is written where the message lives. A voice note that is on
+    // disk but not in the store shows up as a plain label instead of a play
+    // button.
+    if (path) store.setMediaPath(jid, message.id, path)
     store.markDirty()
-    bus.broadcast({ t: 'messageMedia', jid, id: message.id, imagePath: message.imagePath || '' })
+    bus.broadcast({ t: 'messageMedia', jid, id: message.id, imagePath: path })
   }
 
   bus.snapshot = snapshot

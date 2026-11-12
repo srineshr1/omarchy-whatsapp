@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildNotifyArgs } from '../lib/notify.js'
+import { buildNotifyArgs, Notifier } from '../lib/notify.js'
 
 const JID = "5551234@s.whatsapp.net"
 
@@ -38,4 +38,35 @@ test('falls back to the notify-send shape when omarchy is absent', () => {
   assert.equal(args[0], '-a')
   assert.equal(args[1], 'WhatsApp')
   assert.ok(!args.includes('--exec'))
+})
+
+for (const [notifications, sound] of [[true, true], [false, true], [true, false], [false, false]]) {
+  test(`flush respects independent preferences: toast=${notifications}, sound=${sound}`, () => {
+    let settings = { notifications: true, sound: true }
+    const notifier = new Notifier({ readSettings: () => settings })
+    notifier.enabled = true
+    const calls = []
+    notifier.send = () => calls.push('toast')
+    notifier.playSound = () => calls.push('sound')
+    notifier.queue({ jid: JID, title: 'Ada', body: 'hello' })
+    settings = { notifications, sound }
+    notifier.flush(JID)
+    assert.deepEqual(calls, [...(notifications ? ['toast'] : []), ...(sound ? ['sound'] : [])])
+    assert.equal(notifier.pending.size, 0)
+  })
+}
+
+test('chat preferences and read cancellation still suppress both alert channels', () => {
+  const notifier = new Notifier({ readSettings: () => ({ notifications: true, sound: true }) })
+  notifier.enabled = true
+  const calls = []
+  notifier.send = () => calls.push('toast')
+  notifier.playSound = () => calls.push('sound')
+  notifier.queue({ jid: JID, title: 'Ada', body: 'hello', shouldNotify: () => false })
+  notifier.flush(JID)
+  notifier.queue({ jid: JID, title: 'Ada', body: 'hello' })
+  notifier.cancel(JID)
+  notifier.flush(JID)
+  assert.deepEqual(calls, [])
+  assert.equal(notifier.pending.size, 0)
 })

@@ -41,6 +41,38 @@ test('unread total excludes muted and archived chats but includes expired mutes'
   assert.equal(store.totalUnread(), 18)
 })
 
+test('a copy of a message that arrives before its media does not lose the path', () => {
+  const store = makeStore()
+  const jid = 'media@s.whatsapp.net'
+
+  // The message is stored and its media is already on disk.
+  store.upsertMessage(jid, { id: 'A1', ts: 1, type: 'imageMessage', imagePath: '/tmp/photo.jpg' })
+
+  // WhatsApp echoes the message back. The copy arrives while the download is
+  // still running, so it knows no path at all.
+  store.upsertMessage(jid, { id: 'A1', ts: 1, type: 'imageMessage', imagePath: '' })
+
+  const list = store.messageList(jid)
+  assert.equal(list.length, 1)
+  assert.equal(list[0].imagePath, '/tmp/photo.jpg')
+})
+
+test('the stored message learns where its media was downloaded', () => {
+  const store = makeStore()
+  const jid = 'media@s.whatsapp.net'
+
+  store.upsertMessage(jid, { id: 'A2', ts: 1, type: 'audioMessage' })
+
+  // The download finished on a copy of the message that is not the one the
+  // store holds any more, so the path has to be written where the message
+  // lives.
+  store.setMediaPath(jid, 'A2', '/tmp/voice-note.opus')
+
+  const list = store.messageList(jid)
+  assert.equal(list.length, 1)
+  assert.equal(list[0].imagePath, '/tmp/voice-note.opus')
+})
+
 test('alias merge preserves an active mute from the secondary chat', () => {
   const store = makeStore()
   const lid = store.chat('123@lid')

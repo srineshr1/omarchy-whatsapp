@@ -60,9 +60,9 @@ Item {
   signal messageStatusChanged(string jid, string messageId, int status)
   signal messageMedia(string jid, string messageId, string imagePath)
   signal focusRequested(string jid)
-  signal commandFailed(string command, string message)
+  signal commandFailed(string command, string message, string id)
   signal pairCodeReceived(string code)
-  signal sendAcknowledged(string jid)
+  signal sendAcknowledged(string jid, string id)
 
   function request(payload) {
     var socket = socketLoader.item
@@ -128,11 +128,29 @@ Item {
     root.setChats(list)
   }
 
+  // Every request that waits for an answer carries an id, so the answer can
+  // be matched to the request it belongs to and not to a later one.
+  property int requestSeq: 0
+
+  function nextRequestId() {
+    root.requestSeq = root.requestSeq + 1
+    return "r" + root.requestSeq
+  }
+
   function sendMessage(jid, text, quotedId) {
-    if (!jid || !text || !text.length) return false
-    var payload = { t: "send", jid: jid, text: text }
+    if (!jid || !text || !text.length) return ""
+    var payload = { t: "send", jid: jid, text: text, id: root.nextRequestId() }
     if (quotedId) payload.quoted = quotedId
-    return request(payload)
+    return request(payload) ? payload.id : ""
+  }
+
+  // A file the user picked in the panel. The daemon reads it from disk and
+  // sends it as an image, a video or a document, depending on what it is.
+  function sendMedia(jid, path, caption, ptt) {
+    if (!jid || !path) return ""
+    var payload = { t: "sendMedia", jid: jid, path: path, caption: caption || "", id: root.nextRequestId() }
+    if (ptt === true) payload.ptt = true
+    return request(payload) ? payload.id : ""
   }
 
   property bool setupTried: false
@@ -251,11 +269,11 @@ Item {
         break
 
       case "ack":
-        if (frame.jid) root.sendAcknowledged(frame.jid)
+        if (frame.id) root.sendAcknowledged(frame.jid || "", frame.id)
         break
 
       case "error":
-        root.commandFailed(frame.for || "", frame.message || "Unknown daemon error")
+        root.commandFailed(frame.for || "", frame.message || "Unknown daemon error", frame.id || "")
         break
 
       case "pong":

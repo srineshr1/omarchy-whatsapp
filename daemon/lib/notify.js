@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { logger } from './logger.js'
+import { createAlertSettings } from './alert-settings.js'
 
 // nf-fa-whatsapp. Omarchy's notification service renders this through the
 // `omarchy-glyph` hint, matching the bar widget's icon.
@@ -49,7 +50,8 @@ export function buildNotifyArgs({ title, body, jid, useOmarchy: omarchy }) {
 }
 
 export class Notifier {
-  constructor() {
+  constructor({ readSettings = createAlertSettings() } = {}) {
+    this.readSettings = readSettings
     this.enabled = canNotify && process.env.OMARCHY_WHATSAPP_NO_NOTIFY !== '1'
     /** @type {Map<string, {title: string, lines: string[], timer: NodeJS.Timeout}>} */
     this.pending = new Map()
@@ -85,8 +87,9 @@ export class Notifier {
     const body = entry.lines.length > 1
       ? `${entry.lines[entry.lines.length - 1]}\n(+${entry.lines.length - 1} more)`
       : entry.lines[0]
-    this.send(entry.title, body, jid)
-    this.playSound()
+    const settings = this.readSettings()
+    if (settings.notifications) this.send(entry.title, body, jid)
+    if (settings.sound) this.playSound()
   }
 
   playSound() {

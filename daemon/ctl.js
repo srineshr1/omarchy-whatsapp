@@ -3,9 +3,21 @@
 // `npm install` has ever run in daemon/.
 
 import net from 'node:net'
+import { resolve } from 'node:path'
 import { socketPath } from './lib/paths.js'
+import { stageOutgoing } from './lib/staging.js'
 
 const [command, ...args] = process.argv.slice(2)
+
+// Every request that waits for an answer carries an id, so the answer can be
+// matched to it: a failure without one would be about somebody else's
+// message.
+let requestSeq = 0
+
+function requestId() {
+  requestSeq += 1
+  return `cli-${process.pid}-${Date.now()}-${requestSeq}`
+}
 
 const USAGE = `Usage: omarchy-whatsapp-ctl <command> [args]
 
@@ -14,6 +26,7 @@ const USAGE = `Usage: omarchy-whatsapp-ctl <command> [args]
   refresh [jid] [limit]  resync chats from WhatsApp, then dump the list
   messages <jid> [limit] a chat's recent messages as JSON
   send <jid> <text...>   send a text message
+  send-media <jid> <file> [caption...]  send an image or a file
   read <jid>             mark a chat read
   focus <jid>            select that chat in every open bar panel
   login                  start QR pairing (stops after 5 minutes)
@@ -43,7 +56,28 @@ function buildRequest() {
       return { t: 'messages', jid: args[0], limit: Number(args[1]) || 60 }
     case 'send':
       if (args.length < 2) fail('send: jid and text required')
-      return { t: 'send', jid: args[0], text: args.slice(1).join(' ') }
+      return { t: 'send', jid: args[0], text: args.slice(1).join(' '), id: requestId() }
+    case 'send-media': {
+      if (args.length < 2) fail('send-media: jid and file required')
+      // The daemon is another process with its own working directory, so a
+      // relative path would name a file over there instead of the one named
+      // here. It is resolved before it crosses the socket, and then copied
+      // where the daemon can read it: it runs with a private /tmp and would
+      // not see a file the user picked in their own shell.
+      let staged
+      try {
+        staged = stageOutgoing(resolve(args[1]))
+      } catch (err) {
+        fail(`send-media: ${err?.message || err}`)
+      }
+      return {
+        t: 'sendMedia',
+        jid: args[0],
+        path: staged,
+        caption: args.slice(2).join(' '),
+        id: requestId()
+      }
+    }
     case 'read':
       if (!args[0]) fail('read: jid required')
       return { t: 'read', jid: args[0] }

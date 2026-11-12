@@ -13,7 +13,14 @@ const EXT = {
   'image/jpg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
-  'image/gif': 'gif'
+  'image/gif': 'gif',
+  // A voice note from WhatsApp is opus in an ogg container.
+  'audio/ogg': 'opus',
+  'audio/opus': 'opus',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/aac': 'aac',
+  'audio/amr': 'amr'
 }
 
 function safeId(id) {
@@ -33,6 +40,19 @@ export function existingMediaPath(message) {
   if (message.imagePath && existsSync(message.imagePath)) return message.imagePath
   const guessed = mediaPathFor(message.id, message.media.mimetype)
   return existsSync(guessed) ? guessed : ''
+}
+
+// The message the panel sees.
+//
+// The cache on disk is the truth about a media: one that finished
+// downloading after the message was stored is still found there, so the
+// panel gets its path instead of a label. The media itself and the retry
+// content are not for the panel.
+export function publicMessage(message) {
+  if (!message) return message
+  const { media: _ignored, retryMessage: _retryMessage, ...rest } = message
+  if (!rest.imagePath) rest.imagePath = existingMediaPath(message)
+  return rest
 }
 
 function toBuffer(value) {
@@ -55,10 +75,10 @@ function toWaMessage(message) {
     fileSha256: toBuffer(media.fileSha256) || undefined,
     fileLength: media.fileLength || undefined
   }
-  return {
-    key: message.key,
-    message: media.kind === 'sticker' ? { stickerMessage: body } : { imageMessage: body }
-  }
+  const node = media.kind === 'sticker'
+    ? { stickerMessage: body }
+    : (media.kind === 'audio' ? { audioMessage: body } : { imageMessage: body })
+  return { key: message.key, message: node }
 }
 
 export class MediaCache {
@@ -101,7 +121,7 @@ export class MediaCache {
 
   async pull(message) {
     const media = message.media
-    const kind = media.kind === 'sticker' ? 'sticker' : 'image'
+    const kind = media.kind === 'sticker' ? 'sticker' : (media.kind === 'audio' ? 'audio' : 'image')
     const opts = { options: { timeout: 20000 } }
     const first = {
       mediaKey: toBuffer(media.mediaKey),
@@ -114,7 +134,9 @@ export class MediaCache {
       if (!sock?.updateMediaMessage) throw err
       logger.info({ id: message.id }, 'media: refreshing expired link')
       const refreshed = await sock.updateMediaMessage(toWaMessage(message))
-      const node = refreshed?.message?.imageMessage || refreshed?.message?.stickerMessage
+      const node = refreshed?.message?.imageMessage
+        || refreshed?.message?.stickerMessage
+        || refreshed?.message?.audioMessage
       if (node?.directPath) {
         media.directPath = node.directPath
         media.url = node.url || ''

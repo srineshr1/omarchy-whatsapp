@@ -66,6 +66,75 @@ function isPhotoPlaceholder(text) {
   return /^[\uf03e\uf118]?\s*(Photo|Sticker)?$/i.test(String(text || "").trim())
 }
 
+// The path of a file the user picked or dropped.
+//
+// A name with a stray percent sign is not a broken escape sequence, so the
+// decoder must not be allowed to throw: a file called "100%.png" is a real
+// file and has to travel as itself.
+function filePathFromUrl(url) {
+  var value = String(url || "")
+  if (value.indexOf("file://") !== 0) return ""
+  var raw = value.slice("file://".length)
+  try {
+    return decodeURIComponent(raw)
+  } catch (err) {
+    return raw
+  }
+}
+
+// The text that goes back into the composer when a message could not go out.
+//
+// The caption comes back, unless something else was typed in the meantime,
+// which is the user's and stays.
+function restoredAfterFailure(current, sent) {
+  return String(current || "").length === 0 ? String(sent || "") : String(current || "")
+}
+
+// The conversation a picked file belongs to.
+//
+// A file picked for a conversation the user has left does not attach
+// anywhere: it goes with the conversation it was picked for, or nowhere.
+function attachmentChatFor(pickedChat, activeChat) {
+  return pickedChat === activeChat ? pickedChat : ""
+}
+
+// Whether a message can go out now.
+//
+// A message that is still on its way is not sent again: the answer for the
+// first one is what clears the composer, and a second one would deliver the
+// message twice.
+function canSendNow(pending) {
+  return !pending
+}
+
+// Where a recording is written.
+//
+// The runtime directory belongs to the user alone and is wiped at logout.
+// There is no fallback on purpose: a private voice recording is not worth
+// writing where every user on the machine can read it.
+function recordingDirectory(runtimeDir) {
+  return String(runtimeDir || "")
+}
+
+// Whether the daemon is still there.
+//
+// The daemon is: the upload is probably still running, and the message is
+// not sent again. The daemon is gone: the message did not go out.
+function daemonStillThere(linkUp) {
+  return linkUp === true
+}
+
+// Whether a failure frees the composer.
+//
+// The failure has to be about the message that is on its way: another
+// command failing says nothing about it. A failure without an id is about
+// the message that is the only one on its way.
+function failureFreesSend(command, pending, id) {
+  if (!pending) return false
+  if (command !== "send" && command !== "sendMedia") return false
+  return pending.id === id || id === ""
+}
+
 function chatTitle(chat) {
   if (!chat) return ""
   return chat.name || prettyJid(chat.jid)
@@ -91,6 +160,14 @@ function chatPreview(chat) {
   if (chat.lastFromMe) return "You: " + text
   if (chat.isGroup && chat.lastSender) return chat.lastSender + ": " + text
   return text
+}
+
+// How long a voice note is, the way a phone writes it.
+function formatDuration(seconds) {
+  var total = Math.max(0, Math.floor(Number(seconds) || 0))
+  var minutes = Math.floor(total / 60)
+  var rest = total % 60
+  return minutes + ":" + (rest < 10 ? "0" + rest : String(rest))
 }
 
 // Baileys status enum: 1 pending, 2 server ack, 3 delivered, 4 read, 5 played.

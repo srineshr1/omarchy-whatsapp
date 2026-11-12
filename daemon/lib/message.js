@@ -70,28 +70,41 @@ function bytesToB64(value) {
   return ''
 }
 
-// Image/sticker payloads we can decrypt later. Video and documents stay labels.
-export function extractImage(message) {
+// The media the daemon can fetch and hand to the panel: a picture, a sticker
+// or a voice note. A video or a document stays a label, because neither is
+// worth a download the panel cannot show.
+export function extractMedia(message) {
   const content = normalizeMessageContent(message)
   if (!content) return null
   const type = getContentType(content)
-  if (type !== 'imageMessage' && type !== 'stickerMessage') return null
+  if (type !== 'imageMessage' && type !== 'stickerMessage' && type !== 'audioMessage') return null
   const node = content[type]
   if (!node || typeof node !== 'object') return null
   const mediaKey = bytesToB64(node.mediaKey)
   if (!mediaKey || !(node.directPath || node.url)) return null
   const fileLength = Number(node.fileLength || 0)
   return {
-    kind: type === 'stickerMessage' ? 'sticker' : 'image',
-    mimetype: node.mimetype || (type === 'stickerMessage' ? 'image/webp' : 'image/jpeg'),
+    kind: type === 'stickerMessage' ? 'sticker' : (type === 'audioMessage' ? 'audio' : 'image'),
+    mimetype: node.mimetype || defaultMimetypeFor(type),
     mediaKey,
     directPath: node.directPath || '',
     url: node.url || '',
     fileEncSha256: bytesToB64(node.fileEncSha256),
     fileSha256: bytesToB64(node.fileSha256),
     fileLength,
-    caption: typeof node.caption === 'string' ? node.caption : ''
+    caption: typeof node.caption === 'string' ? node.caption : '',
+    // A voice note is a short recording played in place; a music file is not.
+    ptt: !!node.ptt,
+    seconds: Number(node.seconds || 0)
   }
+}
+
+// What a message of this type says when it carries nothing else. A voice note
+// from WhatsApp is opus in an ogg container, which is what a recorder writes.
+function defaultMimetypeFor(type) {
+  if (type === 'stickerMessage') return 'image/webp'
+  if (type === 'audioMessage') return 'audio/ogg; codecs=opus'
+  return 'image/jpeg'
 }
 
 export function isPhotoPlaceholder(text) {

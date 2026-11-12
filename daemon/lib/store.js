@@ -361,6 +361,10 @@ export class Store {
       // Receipts and our own send ack can race with Baileys' PENDING upsert.
       // Never let a later event rewind a tick (clock → sent → delivered → read).
       merged.status = Math.max(prev.status || 0, message.status || 0)
+      // A copy of a message that arrives while its media is still being
+      // downloaded knows no path. The media that is already on disk is not
+      // lost because of that.
+      if (!merged.imagePath && prev.imagePath) merged.imagePath = prev.imagePath
       list[existing] = merged
     } else {
       list.push(message)
@@ -370,6 +374,21 @@ export class Store {
     this.messages.set(key, list)
     this.markDirty()
     return list
+  }
+
+  // A media that finished downloading belongs to the message, so the path is
+  // written where the message lives: the copy the media cache holds may not
+  // be the copy the store holds any more.
+  setMediaPath(jid, id, imagePath) {
+    if (!id || !imagePath) return false
+    const key = this.canonicalJid(jid) || normalizeJid(jid) || jid
+    const list = this.messages.get(key) || []
+    const index = list.findIndex((m) => m.id === id)
+    if (index === -1) return false
+    if (list[index].imagePath === imagePath) return true
+    list[index] = { ...list[index], imagePath }
+    this.markDirty()
+    return true
   }
 
   touchChat(jid, message) {

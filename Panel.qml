@@ -1,9 +1,12 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
+import QtMultimedia
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -27,6 +30,56 @@ Panel {
   property var messages: []
   property int cursorIndex: 0
   property string statusLine: ""
+  readonly property bool notificationsEnabled: root.setting("notifications", "On") !== "Off"
+    && root.setting("notifications", "On") !== false
+  readonly property bool notificationSoundEnabled: root.setting("notificationSound", "On") !== "Off"
+    && root.setting("notificationSound", "On") !== false
+  readonly property bool alertsEnabled: notificationsEnabled || notificationSoundEnabled
+  readonly property bool notificationUpdatePending: notificationUpdater.running
+  property string notificationTarget: "On"
+
+  function toggleNotifications() {
+    if (notificationUpdater.running) return
+    root.notificationTarget = root.alertsEnabled ? "Off" : "On"
+    notificationUpdater.running = true
+  }
+
+  // Use the host CLI so settings persist and reload on every monitor. The
+  // fixed shell program accepts only the internally selected On/Off argument.
+  Process {
+    id: notificationUpdater
+    command: ["sh", "-c",
+      'omarchy bar set io.github.ricky.whatsapp notifications "$1" && '
+        + 'omarchy bar set io.github.ricky.whatsapp notificationSound "$1"',
+      "whatsapp-notifications", root.notificationTarget]
+    onExited: function (exitCode, exitStatus) {
+      if (exitCode !== 0 || exitStatus !== 0)
+        root.statusLine = "Could not update notification settings"
+    }
+  }
+  // What is waiting for the daemon to accept, and what to put back if it does
+  // not: { jid, text, path }.
+  property var pendingSend: null
+  // The voice note being played, if any, so its button can show a stop.
+  property string playingMessageId: ""
+  // A recording in progress, and where it is being written.
+  property bool recording: false
+  property string recordingPath: ""
+  // The conversation the recording was made in: it goes with that one, and
+  // the copy is made long after the recording stopped.
+  property string recordingChat: ""
+  // Where a recording is written. The runtime directory belongs to the user
+  // alone and is wiped at logout, which /tmp is not: anything in /tmp can be
+  // read by every user on the machine. There is no fallback on purpose: a
+  // private voice recording is not worth writing where everyone can read it.
+  readonly property string recordingDir: Model.recordingDirectory(Quickshell.env("XDG_RUNTIME_DIR"))
+  // True between asking the recorder to stop and the file being finished.
+  property bool waitingForRecording: false
+  // The staging requests, one at a time: the staging process reads the file
+  // and the name it is given, so two requests in flight would mix them up.
+  property var stagingQueue: []
+  // The colour the drop surface tints itself with.
+  readonly property color dropTint: bar ? bar.urgent : Commons.Color.accent
   property bool pinToLatest: true
   property bool logoutConfirmOpen: false
   property bool refreshing: false
@@ -52,7 +105,7 @@ Panel {
   // Popup content must use the theme foreground. barForeground can switch to
   // a wallpaper-contrast color when the bar is transparent, which may be dark
   // even though the popup surface remains dark.
-  readonly property color foreground: root.bar ? root.bar.foreground : Color.foreground
+  readonly property color foreground: root.bar ? root.bar.foreground : Commons.Color.foreground
   readonly property color secondaryForeground: Qt.darker(root.foreground, 1.5)
   readonly property int chatLimit: root.setting("chatLimit", 40)
   readonly property int messageLimit: root.setting("messageLimit", 60)
@@ -148,6 +201,9 @@ Panel {
   // User-initiated open: marks the chat read and puts the cursor in the reply box.
   function selectChat(jid) {
     root.prepareChat(jid)
+    // A file picked for one conversation must not travel to another: it goes
+    // with the chat it was picked for.
+    if (root.attachmentChat !== jid) root.clearAttachment()
     if (!root.client) return
     root.client.markRead(jid)
     Qt.callLater(function () { composer.forceActiveFocus() })
@@ -246,16 +302,184 @@ Panel {
 
   function sendReply() {
     var text = composer.text
-    if (!text || !text.trim().length) return
+    var path = root.attachmentPath
+    // A file on its own is a message too: the text is its caption.
+    if ((!text || !text.trim().length) && !path) return
+    // A file goes with the conversation it was picked for, and the
+    // conversation can change without the panel choosing it: the daemon can
+    // point the panel at another chat. So it is checked again here.
+    if (path && Model.attachmentChatFor(root.attachmentChat, root.activeJid).length === 0) {
+      root.statusLine = "The file goes with another conversation"
+      return
+    }
+    // A message that is still on its way is not sent again: the answer for
+    // the first one is what clears the composer, and a second one would
+    // deliver the message twice.
+    if (!Model.canSendNow(root.pendingSend)) return
     if (!root.client || !root.client.ready) {
       root.statusLine = "Not connected to WhatsApp"
       return
     }
-    if (root.client.sendMessage(root.activeJid, text)) {
+
+    var sent = ""
+    if (path) sent = root.client.sendMedia(root.activeJid, path, text, root.attachmentIsVoice)
+    else sent = root.client.sendMessage(root.activeJid, text)
+
+    if (sent) {
+      // The composer lets go of the text as soon as the message is handed
+      // over: what the user types while it is on its way is the next
+      // message, and the text that went out must not go out again with it.
       composer.text = ""
+      // The composer keeps what was typed until the daemon says the message
+      // went out: a file it refuses must not cost the caption either.
+      root.pendingSend = { id: sent, jid: root.activeJid, text: text, path: path }
       root.statusLine = ""
       typingTimer.stop()
       root.client.setTyping(root.activeJid, "paused")
+      sendWatchdog.restart()
+    }
+  }
+
+  // ---- attaching a file --------------------------------------------------
+  //
+  // The platform's own file dialog picks it, and the name of what was picked
+  // sits above the composer until it is sent or taken back.
+  property string attachmentPath: ""
+  property string attachmentName: ""
+  // A recording is a voice note; a file the user picked is a file.
+  property bool attachmentIsVoice: false
+  // The conversation the file was picked for.
+  property string attachmentChat: ""
+
+  function clearAttachment() {
+    root.attachmentPath = ""
+    root.attachmentName = ""
+    root.attachmentChat = ""
+    root.attachmentIsVoice = false
+  }
+
+  // A file becomes the attachment, whatever route it arrived by: the dialog, a
+  // drop on the panel, or a recording.
+  //
+  // The conversation it was picked for comes with it: the user can pick a
+  // file and change conversation while it is being copied, and the file goes
+  // with the conversation it was picked for, or nowhere.
+  function attachFile(path, chat, voice) {
+    if (!path || path.length === 0) return
+    var belongs = Model.attachmentChatFor(chat, root.activeJid)
+    if (belongs.length === 0) {
+      root.statusLine = "The file was picked for another conversation"
+      return
+    }
+    root.attachmentPath = path
+    root.attachmentName = path.split("/").pop()
+    root.attachmentChat = belongs
+    // A recording is a voice note; a file the user picked is a file. It
+    // changes with the attachment, never apart from it.
+    root.attachmentIsVoice = voice === true
+  }
+
+  // Staging a file: the name it travels with, whether it is a voice note and
+  // the conversation it was picked for belong to the request, not to the last
+  // one. A temporary says so too, so the copy takes it away once it is there.
+  function stageFile(path, name, voice, temporary, chat) {
+    root.stagingQueue = root.stagingQueue.concat([
+      { path: path, name: name || "", voice: voice === true, temporary: temporary === true, chat: chat || "" }
+    ])
+    root.startStaging()
+  }
+
+  function startStaging() {
+    if (stager.running || root.stagingQueue.length === 0) return
+    var request = root.stagingQueue[0]
+    stager.source = request.path
+    stager.name = request.name
+    stager.temporary = request.temporary
+    stager.running = true
+  }
+
+  // The message on its way is given up on: the composer is free again, and
+  // what is in it stays.
+  function releasePendingSend() {
+    if (!root.pendingSend) return
+    root.pendingSend = null
+    sendWatchdog.stop()
+  }
+
+  // A voice note is played where it sits. A second press stops it.
+  function toggleAudio(message) {
+    if (!message || !message.imagePath) return
+    if (root.playingMessageId === message.id) {
+      player.stop()
+      root.playingMessageId = ""
+      return
+    }
+    player.source = Qt.resolvedUrl("file://" + message.imagePath)
+    player.play()
+    root.playingMessageId = message.id
+  }
+
+  function startRecording() {
+    if (root.recording) return
+    // A recording is a private thing: it is only written where the user
+    // alone can read it.
+    if (root.recordingDir.length === 0) {
+      root.statusLine = "There is no private directory to record into"
+      return
+    }
+    // Every recording gets a name of its own: there is one panel per monitor,
+    // and two of them recording at the same time must not write over each
+    // other.
+    var path = root.recordingDir + "/omarchy-whatsapp-voice-"
+      + Date.now() + "-" + Math.random().toString(36).slice(2, 8) + ".m4a"
+    recorder.outputLocation = "file://" + path
+    recorder.record()
+    root.recording = true
+    root.recordingPath = path
+    // The conversation the recording is made in: the copy is made long after
+    // the recording stopped, and it goes with this one.
+    root.recordingChat = root.activeJid
+  }
+
+  // A phone plays a voice note in place, and WhatsApp only takes opus for
+  // that. Qt cannot write opus here, so the recording is converted before it
+  // is attached; without the converter the recording goes as a file.
+  function stopRecording() {
+    if (!root.recording) return
+    root.recording = false
+    // The file has to be finished writing before it is converted, so the
+    // conversion waits for the recorder to stop.
+    root.waitingForRecording = true
+    recorder.stop()
+  }
+
+  function convertRecording() {
+    var source = root.recordingPath
+    var target = source.replace(/\.m4a$/, "") + ".opus"
+    converter.source = source
+    converter.target = target
+    converter.running = true
+  }
+
+  // A temporary the panel made goes away with the panel's own hands.
+  function discardRecording(path) {
+    if (!path || path.length === 0) return
+    cleaner.path = path
+    cleaner.running = true
+  }
+
+  FileDialog {
+    id: fileDialog
+    title: "Send a file"
+    onAccepted: {
+      var url = String(selectedFile || "")
+      if (url.length === 0) return
+      // The decoding lives in the model, where it is tested: a name with a
+      // stray percent sign must not take the dialog down with it.
+      var path = Model.filePathFromUrl(url)
+      if (path.length === 0) return
+      // The conversation the file is picked for is the one that is open now.
+      root.stageFile(path, "", false, false, root.activeJid)
     }
   }
 
@@ -366,6 +590,25 @@ Panel {
       if (root.opened && root.client && root.client.ready) root.client.markRead(jid)
     }
 
+    function onSendAcknowledged(jid, id) {
+      // The daemon took the message: now the composer can let go of it.
+      // Only the message that was acknowledged: an answer for another one
+      // says nothing about what is in the composer now.
+      if (!root.pendingSend || root.pendingSend.id !== id) return
+      // The text went with the message as soon as it was handed over, so
+      // what is in the composer now is the next message and it stays. Only
+      // the file that went out goes with it, and only if it is still there.
+      if (root.attachmentPath === root.pendingSend.path) root.clearAttachment()
+      root.releasePendingSend()
+    }
+
+    function onLinkUpChanged() {
+      // The daemon went away: the message that was on its way did not go
+      // out, and the composer is free again. What is in it stays.
+      if (!root.client || root.client.linkUp) return
+      root.releasePendingSend()
+    }
+
     function onMessageStatusChanged(jid, messageId, status) {
       // Receipt JIDs are often a LID or device-suffixed form that does not
       // equal activeJid. Apply by message id in the open thread.
@@ -377,8 +620,15 @@ Panel {
       root.patchMessage(messageId, { imagePath: imagePath })
     }
 
-    function onCommandFailed(command, message) {
-      if (command === "send" || command === "listMember") root.statusLine = message
+    function onCommandFailed(command, message, id) {
+      if (command === "send" || command === "sendMedia" || command === "listMember") root.statusLine = message
+      // The daemon refused it: the caption goes back, so trying again does
+      // not mean typing it all again. It does not go over what was typed
+      // since, and the file stays where it is: it can be tried again.
+      if (Model.failureFreesSend(command, root.pendingSend, id)) {
+        composer.text = Model.restoredAfterFailure(composer.text, root.pendingSend.text)
+        root.releasePendingSend()
+      }
       if (command === "refresh") {
         root.refreshing = false
         refreshWatchdog.stop()
@@ -392,6 +642,123 @@ Panel {
         root.statusLine = message || "Refresh failed"
       }
     }
+  }
+
+  // The voice note being played.
+  AudioOutput {
+    id: playbackOutput
+    volume: 0.9
+  }
+
+  MediaPlayer {
+    id: player
+    audioOutput: playbackOutput
+    // The player has no stopped signal: the state is a property, and the note
+    // that was playing is over when it goes back to stopped.
+    onPlaybackStateChanged: {
+      if (playbackState === MediaPlayer.StoppedState && root.playingMessageId !== "") {
+        root.playingMessageId = ""
+      }
+    }
+    onErrorOccurred: function (error, errorString) {
+      root.playingMessageId = ""
+      root.statusLine = "Could not play the voice note: " + errorString
+    }
+  }
+
+  // The recording, and the microphone it comes from.
+  //
+  // The session has no way of saying that it failed: it only says when the
+  // things plugged into it change. The recorder is the one that knows, and it
+  // says it here.
+  CaptureSession {
+    id: captureSession
+    audioInput: AudioInput {}
+    recorder: MediaRecorder {
+      id: recorder
+      outputLocation: ""
+      onErrorOccurred: function (error, errorString) {
+        // A microphone that is absent, busy or refused ends up here.
+        root.recording = false
+        root.waitingForRecording = false
+        root.statusLine = "The recording failed: " + errorString
+      }
+      // The recorder has no "state" signal: the state is a property, and it
+      // is called recorderState.
+      onRecorderStateChanged: {
+        // The error is sometimes only on the property.
+        if (recorder.error !== MediaRecorder.NoError) {
+          root.recording = false
+          root.waitingForRecording = false
+          root.statusLine = "The recording failed: " + recorder.errorString
+          return
+        }
+        if (recorderState !== MediaRecorder.StoppedState) return
+        if (!root.waitingForRecording) return
+        root.waitingForRecording = false
+        root.convertRecording()
+      }
+    }
+  }
+
+  // The daemon runs with a private /tmp, so a file that is going out is
+  // copied where it can read it before it is sent.
+  Process {
+    id: stager
+    property string source: ""
+    property string name: ""
+    // A temporary goes away with its copy: the copy is what travels.
+    property bool temporary: false
+    property var argv: {
+      var list = [root.pluginDir + "/bin/omarchy-whatsapp-stage.mjs", stager.source, stager.name]
+      if (stager.temporary) list.push("--remove-source")
+      return list
+    }
+    command: stager.argv
+    stdout: SplitParser {
+      onRead: function (data) {
+        var path = String(data || "").trim()
+        var request = root.stagingQueue.length > 0 ? root.stagingQueue[0] : null
+        if (path.length === 0 || !request) return
+        root.attachFile(path, request.chat, request.voice)
+      }
+    }
+    onExited: function (exitCode) {
+      if (root.stagingQueue.length > 0) root.stagingQueue = root.stagingQueue.slice(1)
+      if (exitCode !== 0) root.statusLine = "Could not read the file to send"
+      root.startStaging()
+    }
+  }
+
+  // Opus, because that is what a voice note is.
+  Process {
+    id: converter
+    property string source: ""
+    property string target: ""
+    command: ["ffmpeg", "-y", "-loglevel", "error", "-i", converter.source, "-c:a", "libopus", "-b:a", "32k", converter.target]
+    onExited: function (exitCode) {
+      if (exitCode === 0) {
+        // The converted note is a temporary: the copy that travels replaces
+        // it. The recording it came from has nothing left to do either.
+        root.stageFile(converter.target, "voice-note.opus", true, true, root.recordingChat)
+        root.discardRecording(converter.source)
+        root.statusLine = ""
+        return
+      }
+      // Without opus the recording is not a voice note: WhatsApp plays a voice
+      // note in place and this one would not play at all. It goes as a file,
+      // and the person sending it is told that is what happened.
+      root.stageFile(converter.source, "voice-note.m4a", false, true, root.recordingChat)
+      root.statusLine = "The recording could not be turned into a voice note; it goes as a file"
+    }
+  }
+
+  // The raw recording is a temporary the panel made, so the panel is the one
+  // that takes it away.
+  Process {
+    id: cleaner
+    property string path: ""
+    command: ["rm", "-f", cleaner.path]
   }
 
   Process {
@@ -424,6 +791,31 @@ Panel {
     interval: 3000
     repeat: false
     onTriggered: if (root.client && root.activeJid) root.client.setTyping(root.activeJid, "paused")
+  }
+
+  // The daemon always answers, but it can take a while: a file of sixteen
+  // megabytes goes up on a connection that is not always quick. The message
+  // stays on its way until the answer arrives, so it is not sent twice. If
+  // the daemon is gone, the message did not go out and the composer is free
+  // again.
+  Timer {
+    id: sendWatchdog
+    // How often the panel says the message is still on its way. It is not a
+    // deadline: nothing is given up on when it passes.
+    interval: 30000
+    repeat: false
+    onTriggered: {
+      if (root.client && Model.daemonStillThere(root.client.linkUp)) {
+        // The daemon is still there: the upload is probably still running.
+        root.statusLine = "The message is still on its way"
+        sendWatchdog.restart()
+        return
+      }
+      root.releasePendingSend()
+      // The daemon is not answering at all, and it is the one that sends.
+      // It has to be started again for anything else to go out.
+      root.statusLine = "The daemon is not answering; it has to be started again"
+    }
   }
 
   Timer {
@@ -504,8 +896,8 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             radius: 0
             color: backMouse.containsMouse
-              ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
-              : Style.normalFillFor(root.foreground, Color.accent)
+              ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Commons.Color.accent)
+              : Style.normalFillFor(root.foreground, Commons.Color.accent)
             border.color: root.foreground
             border.width: 1
 
@@ -557,7 +949,7 @@ Panel {
                 return unread > 0 ? unread + " unread" : ""
               }
               visible: text.length > 0
-              color: root.statusLine.length > 0 ? (root.bar ? root.bar.urgent : Color.urgent) : root.secondaryForeground
+              color: root.statusLine.length > 0 ? (root.bar ? root.bar.urgent : Commons.Color.urgent) : root.secondaryForeground
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
@@ -569,6 +961,17 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
+
+            PanelActionButton {
+              objectName: "notificationBell"
+              iconText: root.alertsEnabled ? "\uf0f3" : "\uf1f6"
+              tooltipText: root.alertsEnabled ? "Mute notifications and sound" : "Enable notifications and sound"
+              enabled: !root.notificationUpdatePending
+              focusable: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.toggleNotifications()
+            }
 
             PanelActionButton {
               visible: !root.showLogin
@@ -596,7 +999,7 @@ Panel {
               iconText: "\uf011"
               tooltipText: "Log out of WhatsApp"
               foreground: root.foreground
-              hoverColor: root.bar ? root.bar.urgent : Color.urgent
+              hoverColor: root.bar ? root.bar.urgent : Commons.Color.urgent
               fontFamily: root.fontFamily
               onClicked: root.requestLogout()
             }
@@ -686,11 +1089,11 @@ Panel {
               height: ListView.view.height
               radius: height / 2
               color: listChip.active
-                ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
+                ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Commons.Color.accent)
                 : chipMouse.containsMouse
-                  ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
-                  : Style.normalFillFor(root.foreground, Color.accent)
-              border.color: listChip.active ? (root.bar ? root.bar.urgent : Color.accent) : "transparent"
+                  ? Style.hoverFillFor(root.foreground, root.bar ? root.bar.urgent : Commons.Color.accent)
+                  : Style.normalFillFor(root.foreground, Commons.Color.accent)
+              border.color: listChip.active ? (root.bar ? root.bar.urgent : Commons.Color.accent) : "transparent"
               border.width: 1
 
               Text {
@@ -775,7 +1178,7 @@ Panel {
                 implicitHeight: rowText.implicitHeight + Style.space(10)
                 height: implicitHeight
                 foreground: root.foreground
-                accent: root.bar ? root.bar.urgent : Color.accent
+                accent: root.bar ? root.bar.urgent : Commons.Color.accent
                 hasCursor: root.cursorIndex === chatRow.index
 
                 Column {
@@ -837,13 +1240,13 @@ Panel {
                     width: implicitWidth
                     height: implicitHeight
                     radius: height / 2
-                    color: root.bar ? root.bar.urgent : Color.urgent
+                    color: root.bar ? root.bar.urgent : Commons.Color.urgent
 
                     Text {
                       id: badgeLabel
                       anchors.centerIn: parent
                       text: Model.badgeText(chatRow.modelData.unread)
-                      color: Color.background
+                      color: Commons.Color.background
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                       font.bold: true
@@ -928,12 +1331,17 @@ Panel {
                 // width depend on content that depends on the bubble: a binding
                 // loop, which collapses every bubble to a few pixels.
                 readonly property real maxInner: Math.max(Style.space(60), bubbleRow.width * 0.82 - bubbleRow.pad * 2)
-                readonly property bool hasImage: messageRow.modelData.imagePath
-                  && String(messageRow.modelData.imagePath).length > 0
+                readonly property bool hasImage: messageRow.modelData.mediaKind !== "audio"
+                  && String(messageRow.modelData.imagePath || "").length > 0
+                // A voice note that made it to the disk can be played here.
+                readonly property bool hasAudio: messageRow.modelData.mediaKind === "audio"
+                  && String(messageRow.modelData.imagePath || "").length > 0
                 readonly property bool showBody: {
                   var text = messageRow.modelData.text || ""
                   if (!text.length) return false
                   if (bubbleRow.hasImage && Model.isPhotoPlaceholder(text)) return false
+                  // A voice note shows its button and its length instead.
+                  if (bubbleRow.hasAudio) return false
                   return true
                 }
                 readonly property bool showSender: !messageRow.modelData.fromMe
@@ -948,8 +1356,8 @@ Panel {
                   anchors.left: messageRow.modelData.fromMe ? undefined : parent.left
                   radius: Style.cornerRadius > 0 ? Style.cornerRadius : Style.space(6)
                   color: messageRow.modelData.fromMe
-                    ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Color.accent)
-                    : Style.normalFillFor(root.foreground, Color.accent)
+                    ? Style.selectedFillFor(root.foreground, root.bar ? root.bar.urgent : Commons.Color.accent)
+                    : Style.normalFillFor(root.foreground, Commons.Color.accent)
 
                   Column {
                     id: bubbleContent
@@ -959,6 +1367,7 @@ Panel {
                     width: Math.max(
                       bubbleRow.showSender ? senderLabel.width : 0,
                       bubbleRow.hasImage ? photo.width : 0,
+                      bubbleRow.hasAudio ? audioRow.width : 0,
                       bodyLabel.visible ? bodyLabel.width : 0,
                       Math.min(metaLabel.implicitWidth, bubbleRow.maxInner))
 
@@ -967,7 +1376,7 @@ Panel {
                       visible: bubbleRow.showSender
                       width: Math.min(implicitWidth, bubbleRow.maxInner)
                       text: messageRow.modelData.senderName || ""
-                      color: root.bar ? root.bar.urgent : Color.accent
+                      color: root.bar ? root.bar.urgent : Commons.Color.accent
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                       font.bold: true
@@ -1012,14 +1421,59 @@ Panel {
                       }
                     }
 
+                    // A voice note: a button to play it, and how long it is.
+                    Row {
+                      id: audioRow
+                      visible: bubbleRow.hasAudio
+                      spacing: Style.space(6)
+                      height: Math.max(audioButton.height, audioLength.implicitHeight)
+
+                      Rectangle {
+                        id: audioButton
+                        width: Style.space(22)
+                        height: width
+                        radius: width / 2
+                        color: root.playingMessageId === messageRow.modelData.id
+                          ? (root.bar ? root.bar.urgent : Commons.Color.accent)
+                          : "transparent"
+                        border.color: root.foreground
+                        border.width: 1
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: root.playingMessageId === messageRow.modelData.id ? "\uf04d" : "\uf04b"
+                          color: root.playingMessageId === messageRow.modelData.id
+                            ? (root.bar ? root.bar.barForeground : Commons.Color.background)
+                            : root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
+
+                        TapHandler {
+                          onTapped: root.toggleAudio(messageRow.modelData)
+                        }
+                      }
+
+                      Text {
+                        id: audioLength
+                        text: Model.formatDuration(messageRow.modelData.mediaSeconds)
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        // The row is a positioner: it places its children, so
+                        // this one must not ask for anchors as well.
+                        verticalAlignment: Text.AlignVCenter
+                      }
+                    }
+
                     Text {
                       id: bodyLabel
                       visible: bubbleRow.showBody
                       width: Math.min(implicitWidth, bubbleRow.maxInner)
                       textFormat: Text.StyledText
-                      text: Model.formatMessageText(messageRow.modelData.text, root.bar ? root.bar.urgent : Color.accent)
+                      text: Model.formatMessageText(messageRow.modelData.text, root.bar ? root.bar.urgent : Commons.Color.accent)
                       color: root.foreground
-                      linkColor: root.bar ? root.bar.urgent : Color.accent
+                      linkColor: root.bar ? root.bar.urgent : Commons.Color.accent
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
                       wrapMode: Text.Wrap
@@ -1047,7 +1501,7 @@ Panel {
                         return stampText + " " + Model.statusGlyph(messageRow.modelData.status)
                       }
                       color: messageRow.modelData.fromMe && Model.statusIsRead(messageRow.modelData.status)
-                        ? (root.bar ? root.bar.urgent : Color.accent)
+                        ? (root.bar ? root.bar.urgent : Commons.Color.accent)
                         : root.secondaryForeground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
@@ -1068,18 +1522,58 @@ Panel {
           }
 
           // ── Inline reply ───────────────────────────────────────────────
+          //
+          // What is about to be sent, so it can be seen and taken back.
+          Rectangle {
+            id: attachmentChip
+            visible: root.attachmentPath.length > 0
+            width: attachmentRow.implicitWidth + Style.space(12)
+            height: attachmentRow.implicitHeight + Style.space(6)
+            radius: Style.cornerRadius
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: composerRow.top
+            anchors.bottomMargin: Style.space(4)
+
+            Row {
+              id: attachmentRow
+              anchors.centerIn: parent
+              spacing: Style.space(6)
+
+              Text {
+                text: root.attachmentName
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideMiddle
+              }
+              Text {
+                text: "\u00d7"
+                color: root.secondaryForeground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            TapHandler {
+              onTapped: root.clearAttachment()
+            }
+          }
+
           Item {
+            id: composerRow
             width: parent.width
             implicitHeight: Math.max(composer.implicitHeight, sendButton.implicitHeight)
 
             TextField {
               id: composer
+              objectName: "messageComposer"
               anchors.left: parent.left
-              anchors.right: sendButton.left
+              anchors.right: attachButton.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
               foreground: root.foreground
-              accent: root.bar ? root.bar.urgent : Color.accent
+              accent: root.bar ? root.bar.urgent : Commons.Color.accent
               placeholderText: root.linked ? "Reply\u2026" : "Not connected"
               enabled: root.linked
               onAccepted: root.sendReply()
@@ -1096,12 +1590,45 @@ Panel {
             }
 
             PanelActionButton {
+              id: attachButton
+              anchors.right: recordButton.left
+              anchors.rightMargin: Style.space(4)
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\uf0c6"
+              tooltipText: "Attach an image or a file"
+              enabled: root.linked
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: fileDialog.open()
+            }
+
+            // Record a voice note, right here. A second press stops it and
+            // attaches what was recorded.
+            PanelActionButton {
+              id: recordButton
+              anchors.right: sendButton.left
+              anchors.rightMargin: Style.space(4)
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: root.recording ? "\uf04d" : "\uf130"
+              tooltipText: root.recording ? "Stop recording" : "Record a voice note"
+              enabled: root.linked
+              foreground: root.recording ? (root.bar ? root.bar.urgent : Commons.Color.accent) : root.foreground
+              fontFamily: root.fontFamily
+              onClicked: {
+                if (root.recording) root.stopRecording()
+                else root.startRecording()
+              }
+            }
+
+            PanelActionButton {
               id: sendButton
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               iconText: "\uf1d8"
               tooltipText: "Send"
-              enabled: root.linked && composer.text.trim().length > 0
+              // A message that is still on its way is not sent twice.
+              enabled: root.linked && Model.canSendNow(root.pendingSend)
+                && (composer.text.trim().length > 0 || root.attachmentPath.length > 0)
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: root.sendReply()
@@ -1111,12 +1638,42 @@ Panel {
       }
 
       // ── List picker (l) ────────────────────────────────────────────────
+      // A screenshot, a picture, a file: dropped anywhere on the panel, it
+      // becomes the attachment. It sits beside the content rather than inside
+      // it, because a positioner refuses anchors on its children.
+      DropArea {
+        id: dropArea
+        anchors.fill: parent
+        keys: ["text/uri-list"]
+        onDropped: function (drop) {
+          if (!drop.hasUrls || drop.urls.length === 0) return
+          // The decoding lives in the model, where it is tested: a name with a
+          // stray percent sign must not take the panel down with it.
+          var path = Model.filePathFromUrl(String(drop.urls[0]))
+          if (path.length === 0) return
+          // The conversation the file is dropped in is the one that is open
+          // now.
+          root.stageFile(path, "", false, false, root.activeJid)
+        }
+
+        Rectangle {
+          anchors.fill: parent
+          visible: dropArea.containsDrag
+          // Qt.rgba takes three numbers and an alpha, not a colour and an
+          // alpha, so the colour is taken apart first.
+          color: Qt.rgba(dropTint.r, dropTint.g, dropTint.b, 0.08)
+          border.color: dropTint
+          border.width: 2
+          radius: Style.cornerRadius > 0 ? Style.cornerRadius : Style.space(6)
+        }
+      }
+
       Rectangle {
         id: listPicker
         visible: root.listPickerOpen
         anchors.fill: parent
         z: 10
-        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.94)
+        color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.94)
         focus: root.listPickerOpen
 
         Keys.onPressed: function (event) {
@@ -1170,7 +1727,7 @@ Panel {
               width: parent.width
               height: pickerLabel.implicitHeight + Style.space(10)
               foreground: root.foreground
-              accent: root.bar ? root.bar.urgent : Color.accent
+              accent: root.bar ? root.bar.urgent : Commons.Color.accent
               hasCursor: root.listPickerIndex === pickerRow.index
 
               Text {

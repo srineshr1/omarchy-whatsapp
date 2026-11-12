@@ -1,8 +1,9 @@
 # WhatsApp for Omarchy
 
 WhatsApp in the Omarchy Quattro bar: unread badge, desktop notifications you can
-click, inline reply without leaving the bar, and one keystroke to the full
-WhatsApp Web client when you need media, calls, or search.
+click, inline reply without leaving the bar, images and voice notes you can
+play, and one keystroke to the full WhatsApp Web client when you need calls or
+search.
 
 <p align="center">
   <img src="docs/inbox.png" alt="Chat list in the Omarchy bar" width="48%" />
@@ -83,13 +84,34 @@ systemctl --user edit omarchy-whatsapp     # Environment=OMARCHY_WHATSAPP_PAIRIN
 | Reorder pinned chats (this panel only) | `Shift+↑` / `Shift+↓`, or `Shift+K` / `Shift+J` |
 | Add the chat to / remove it from your lists | `l`, then `Enter` to toggle, `Escape` when done |
 | Refresh chats | Refresh button, or `r` |
+| Mute or enable desktop notifications and sound | Bell button in the panel header |
 | Open a chat | `Enter` |
 | Reply | Type, then `Enter` |
+| Attach an image or a file | The paperclip next to the reply box, then `Enter` to send |
+| Send a file you dropped on the panel | Drop it anywhere on the panel |
+| Play a voice note | The play button next to it in the conversation |
+| Record a voice note | The microphone next to the reply box, then again to stop |
 | Back to the chat list | `Escape` |
 | Close the panel | `Escape` from the list |
 | Full WhatsApp Web | Right-click the icon, or the ⧉ button in the panel |
 | Log out | Power button on the chat list |
 | Open a chat from a notification | Click the notification |
+
+A file is sent as an image, a video or a document, depending on what it is, and
+whatever was typed in the reply box travels as its caption. Only regular files
+can be attached; devices and named pipes are rejected before copying. The name of the
+file you picked shows above the box; click it to take the file back, and it
+goes with the conversation it was picked for. A file dropped on the panel
+becomes the attachment the same way, so a screenshot is a file like any other.
+The same thing from a terminal:
+
+```sh
+omarchy-whatsapp-ctl send-media <jid> <file> [caption]
+```
+
+A voice note that arrives is downloaded and played where it sits, with its
+length next to it. A voice note you record is turned into opus and sent as a
+voice note, the way a phone sends one: played in place, with no download.
 
 Pinned chats sit on top in the phone's pin order, and the list tabs mirror
 the Favourites and custom lists from your phone. The daemon reads both from
@@ -143,11 +165,39 @@ and hot-reload on save:
 | `socketPath` | `""` | Daemon socket; blank uses `$XDG_RUNTIME_DIR/omarchy-whatsapp.sock` |
 | `autostartDaemon` | `true` | Start the daemon if the socket is missing |
 | `showUnreadCount` | `true` | Show the count next to the icon |
+| `notifications` | `"On"` | Desktop notification popups (`"Off"` disables them) |
+| `notificationSound` | `"On"` | Message alert sound (`"Off"` silences it) |
 | `hideWhenEmpty` | `false` | Hide the widget entirely when nothing is unread |
 | `chatLimit` | `40` | Chats listed in the panel |
 | `messageLimit` | `60` | Messages loaded per conversation |
 | `webAppUrl` | `https://web.whatsapp.com` | Full client URL |
 | `webAppPattern` | `web.whatsapp.com` | Window pattern used to focus the full client |
+
+To silence incoming messages while keeping popups, set `notificationSound` to
+`"Off"`. To disable popups too, set both options to `"Off"`:
+
+```json
+{ "id": "io.github.ricky.whatsapp", "notifications": "Off", "notificationSound": "Off" }
+```
+
+These independent settings apply to all monitors and are read by the daemon
+before delivering each alert, without a restart. They do not change the unread
+badge, message delivery, or voice-note playback. Chat mutes and archive rules
+still suppress both channels. Existing `OMARCHY_WHATSAPP_NO_NOTIFY=1` (all alerts)
+and `OMARCHY_WHATSAPP_NO_SOUND=1` (sound only) environment overrides remain in effect.
+The full WhatsApp Web client's notifications are separate.
+
+The panel header bell silences both popups and alert sound; click the slashed
+bell to enable both again. The bell indicates enabled when either channel is
+on. Changes persist and apply to every monitor. For independent control:
+
+```sh
+omarchy bar set io.github.ricky.whatsapp notifications On
+omarchy bar set io.github.ricky.whatsapp notificationSound Off
+```
+
+After upgrading, restart the daemon once (`omarchy-whatsapp restart`) to load
+the new notification behavior. Later setting changes need no restart.
 
 Move the widget:
 
@@ -161,13 +211,15 @@ omarchy bar move io.github.ricky.whatsapp --section right
 |------|----------|
 | `~/.local/state/omarchy-whatsapp/auth/` | Linked-device credentials and Signal keys (`0700`) |
 | `~/.local/state/omarchy-whatsapp/store.json` | Recent chats and up to 200 messages per chat (`0600`) |
+| `~/.cache/omarchy-whatsapp/media/` | Downloaded pictures and voice notes (`0700`) |
 | `$XDG_RUNTIME_DIR/omarchy-whatsapp.sock` | Control socket (`0600`, cleared on logout) |
 
-Nothing leaves your machine except traffic to WhatsApp itself. Media is never
-downloaded — photos and voice notes show as `📷 Photo`, `🎤 Voice message`, and
-so on. Open the full client for the real thing.
+Nothing leaves your machine except traffic to WhatsApp itself. A picture or a
+voice note that arrives is downloaded into the cache above, so the panel can
+show and play it; a video or a document stays a label, because neither is worth
+a download the panel cannot show. Open the full client for the rest.
 
-`omarchy-whatsapp logout` unlinks the device and deletes all three.
+`omarchy-whatsapp logout` unlinks the device and deletes all four.
 
 Disabling the bar widget with `omarchy plugin disable io.github.ricky.whatsapp`
 also stops and disables the WhatsApp user service. Linked-device credentials
