@@ -81,6 +81,8 @@ let pairingWanted = false
 let creds = null
 let needsLogin = false
 let lastError = ''
+// Shown next to the login QR after a pairing failed and was reset.
+let loginNotice = ''
 let reconnectAttempts = 0
 let reconnectTimer = null
 let connecting = false
@@ -168,6 +170,7 @@ function state() {
     me: store.me,
     unread: store.totalUnread(),
     lastError,
+    loginNotice,
     daemonPid: process.pid
   }
 }
@@ -829,6 +832,7 @@ async function connect() {
         qrCount = 0
         reconnectAttempts = 0
         lastError = ''
+        loginNotice = ''
         clearQr()
         const user = thisSocket.user
         store.me = user
@@ -874,6 +878,20 @@ async function connect() {
             clearQr()
             pushState()
             pushChats()
+          } else if (pairingWanted && !pairingStopped && creds?.me?.id) {
+            // The phone scanned a code but WhatsApp then refused to finish the
+            // link. The half-paired credentials can never succeed, and retrying
+            // with them keeps the server from issuing a new QR, so start over.
+            logger.warn('connection: pairing was rejected after the scan, resetting for a fresh QR')
+            rmSync(authDir, { recursive: true, force: true })
+            ensureDirs()
+            creds = null
+            loginNotice = 'Pairing was rejected by WhatsApp. Scan the new QR code to link again.'
+            needsLogin = true
+            clearQr()
+            pushState()
+            pushChats()
+            scheduleReconnect(PAIRING_RETRY_MS, { reason: 'pairing reset', countsAsFailure: false })
           } else if (pairingWanted && !pairingStopped) {
             logger.warn('connection: pairing attempt rejected, retrying')
             needsLogin = true

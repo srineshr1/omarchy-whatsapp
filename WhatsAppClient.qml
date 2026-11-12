@@ -36,6 +36,7 @@ Item {
   property int unread: 0
   property var me: null
   property string lastError: ""
+  property string loginNotice: ""
   property var chats: []
   property int chatsEpoch: 0
   // Custom WhatsApp chat lists, in the phone's order: [{ id, name }].
@@ -213,6 +214,7 @@ Item {
         root.unread = frame.unread || 0
         root.me = frame.me || null
         root.lastError = frame.lastError || ""
+        root.loginNotice = frame.loginNotice || ""
         if (frame.lists !== undefined) root.lists = frame.lists || []
         if (frame.chats !== undefined) root.setChats(frame.chats || [])
         if (root.linked) root.pendingLogin = false

@@ -552,6 +552,7 @@ Panel {
               text: {
                 if (root.statusLine.length > 0) return root.statusLine
                 if (root.view === "chat") return ""
+                if (root.needsLogin && root.client && root.client.loginNotice.length > 0) return root.client.loginNotice
                 if (root.needsLogin) return root.hasQr ? "Scan the QR code" : ""
                 var unread = root.client ? root.client.unread : 0
                 return unread > 0 ? unread + " unread" : ""
